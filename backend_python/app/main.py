@@ -1,5 +1,6 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,6 +21,8 @@ from app.config import Settings, get_settings
 from app.core.errors import APIError
 from app.db.bootstrap import initialize_database_state
 from app.db.session import dispose_engine, get_session
+from app.devices.routes import router as devices_router
+from app.devices.state_listener import mark_stale_devices_offline, mqtt_state_listener
 from app.pairing.routes import router as pairing_router
 from app.ws.routes import router as websocket_router
 
@@ -55,6 +58,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     configured = settings or get_settings()
 
+    stop_background = asyncio.Event()
+    background_tasks: list[asyncio.Task[None]] = []
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if configured.demo_insecure:
@@ -62,9 +68,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."
             )
         await initialize_database_state(configured)
+        stop_background.clear()
+        background_tasks.append(asyncio.create_task(mark_stale_devices_offline(stop_background)))
+        if configured.mqtt_enabled:
+            background_tasks.append(
+                asyncio.create_task(mqtt_state_listener(configured, stop_background))
+            )
         try:
             yield
         finally:
+            stop_background.set()
+            for task in background_tasks:
+                task.cancel()
+            if background_tasks:
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+            background_tasks.clear()
             await dispose_engine()
 
     application = FastAPI(
@@ -149,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(auth_router)
     application.include_router(pairing_router)
+    application.include_router(devices_router)
     application.include_router(websocket_router)
     return application
 
