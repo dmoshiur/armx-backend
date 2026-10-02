@@ -180,6 +180,21 @@ async def test_intercom_missed_delivery_is_not_queued_and_both_sides_see_same_ro
         assert sender_log.json()[0]["id"] == recipient_log.json()[0]["id"] == announcement["id"]
         assert sender_log.json()[0]["status"] == recipient_log.json()[0]["status"] == "MISSED"
 
+        recipients = await client.get("/v1/intercom/recipients", headers=sender_headers)
+        assert recipients.status_code == 200
+        recipient_entry = next(
+            item for item in recipients.json() if item["user_id"] == "user-recipient"
+        )
+        assert recipient_entry["display_name"] == "Living room tablet"
+        assert recipient_entry["role"] == "user"
+
+        filtered_log = await client.get(
+            "/v1/intercom/announcements?target_user_id=user-recipient",
+            headers=sender_headers,
+        )
+        assert filtered_log.status_code == 200
+        assert len(filtered_log.json()) == 1
+
         audio = await client.get(
             f"/v1/intercom/announcements/{announcement['id']}/audio",
             headers=recipient_headers,

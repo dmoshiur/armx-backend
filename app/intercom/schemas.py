@@ -24,6 +24,8 @@ class RecipientResponse(BaseModel):
     name: str
     user_id: str
     user_display_name: str
+    display_name: str = ""
+    role: str = ""
     consented: bool
     online: bool
     last_seen_at: datetime | None = None
@@ -34,7 +36,7 @@ class AnnouncementResponse(BaseModel):
     from_user_id: str
     from_name: str
     scope: Literal["USER", "BROADCAST"]
-    target_user_id: str | None = None
+    target_user_id: str = ""
     target_label: str
     audio_url: str
     duration_ms: int

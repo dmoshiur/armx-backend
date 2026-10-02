@@ -23,6 +23,7 @@ from app.devices.schemas import (
     DeviceCommandRequest,
     DeviceCommandResponse,
     DeviceResponse,
+    SceneActivateRequest,
     UnpairRequest,
 )
 from app.ws.manager import connection_manager
@@ -261,6 +262,59 @@ async def send_command(
             "physical state is not confirmed."
         ),
     )
+
+
+@router.post("/scenes/{scene_id}/activate", status_code=204)
+async def activate_scene(
+    scene_id: str,
+    body: SceneActivateRequest,
+    principal: Principal = Depends(require_principal),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    if await is_kill_switch_engaged(session):
+        raise APIError("kill_switch_active", "The global kill-switch is engaged", status_code=423)
+
+    clean_scene_id = scene_id.strip()[:96]
+    if not clean_scene_id:
+        raise APIError("invalid_scene", "Scene identifier is required", status_code=400)
+
+    try:
+        await consume_owner_assertion(
+            session,
+            principal,
+            body.owner_verified,
+            tier=RiskTier.MEDIUM,
+            max_ttl_seconds=settings.owner_assertion_ttl_seconds,
+        )
+    except APIError:
+        await write_audit(
+            session,
+            actor_user_id=principal.user.id,
+            subject_user_id=principal.user.id,
+            device_id=principal.device.id,
+            action="scene.activate",
+            target=clean_scene_id,
+            risk_tier=RiskTier.MEDIUM.value,
+            outcome="DENIED",
+            detail="Scene activation refused by server-side verification policy.",
+        )
+        await session.commit()
+        raise
+
+    await write_audit(
+        session,
+        actor_user_id=principal.user.id,
+        subject_user_id=principal.user.id,
+        device_id=principal.device.id,
+        action="scene.activate",
+        target=clean_scene_id,
+        risk_tier=RiskTier.MEDIUM.value,
+        outcome="SUCCESS",
+        detail="Verified scene activation request recorded.",
+    )
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.post("/unpair", status_code=204)

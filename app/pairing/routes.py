@@ -4,12 +4,14 @@ import base64
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.service import write_audit
 from app.auth.schemas import PairApprovedResponse, PairPendingResponse, PairRequest
 from app.config import Settings, get_settings
 from app.core.errors import APIError
@@ -17,11 +19,13 @@ from app.core.security import (
     canonical_json_bytes,
     decode_ed25519_spki,
     decrypt_pairing_secret,
+    encrypt_pairing_secret,
+    hash_device_key,
     hash_nonce,
     verify_ed25519_signature,
 )
+from app.db.models import Device, UsedNonce, User
 from app.db.models import PairingRequest as PairingRequestRow
-from app.db.models import UsedNonce, User
 from app.db.session import get_session
 
 router = APIRouter(prefix="/devices", tags=["pairing"])
@@ -46,8 +50,102 @@ def _poll_signed(pairing_request: PairingRequestRow, body: PairRequest) -> bool:
     )
 
 
+async def apply_pairing_decision(
+    session: AsyncSession,
+    settings: Settings,
+    request: PairingRequestRow,
+    *,
+    approved: bool,
+    actor_user_id: UUID | None = None,
+    actor_device_id: UUID | None = None,
+) -> None:
+    now = datetime.now(UTC)
+    expires_at = request.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= now:
+        request.status = "expired"
+        request.resolved_at = now
+        await session.commit()
+        raise APIError("pairing_expired", "Pairing request expired", status_code=409)
+
+    if not approved:
+        request.status = "rejected"
+        request.resolved_at = now
+        await write_audit(
+            session,
+            actor_user_id=actor_user_id or request.owner_id,
+            subject_user_id=request.owner_id,
+            device_id=actor_device_id,
+            action="pairing.reject",
+            target=request.device_public_id,
+            outcome="DENIED",
+            detail="Operator rejected a pending device pairing request.",
+        )
+        return
+
+    owner_id = request.owner_id
+    if owner_id is None:
+        candidates = (await session.scalars(select(User).order_by(User.created_at))).all()
+        owner_id = next(
+            (candidate.id for candidate in candidates if "owner" in candidate.roles), None
+        )
+    if owner_id is None:
+        raise APIError(
+            "pairing_invalid_state",
+            "No owner account exists to bind this device",
+            status_code=409,
+        )
+
+    device_key = f"arx.device.{token_urlsafe(36)}"
+    device = Device(
+        public_id=request.device_public_id,
+        owner_id=owner_id,
+        name=request.device_name,
+        platform=request.platform,
+        public_key=request.public_key,
+        device_key_hash=hash_device_key(device_key),
+        site="home",
+        kind="OTHER",
+        state_json={
+            "id": request.device_public_id,
+            "name": request.device_name,
+            "site": "home",
+            "kind": "OTHER",
+            "online": False,
+            "risk_tier": "MEDIUM",
+            "firmware": "unknown",
+            "last_seen_at": now.isoformat(),
+            "relays": [],
+            "sensors": [],
+            "tags": {},
+        },
+        paired_at=now,
+    )
+    session.add(device)
+    await session.flush()
+    request.device_id = device.id
+    request.owner_id = owner_id
+    request.device_key_ciphertext = encrypt_pairing_secret(settings, device_key)
+    request.status = "approved"
+    request.resolved_at = now
+    await write_audit(
+        session,
+        actor_user_id=actor_user_id or owner_id,
+        subject_user_id=owner_id,
+        device_id=actor_device_id or device.id,
+        action="pairing.approve",
+        target=request.device_public_id,
+        outcome="SUCCESS",
+        detail="Device pairing request approved.",
+    )
+
+
 async def _new_request(
-    body: PairRequest, public_key_bytes: bytes, session: AsyncSession
+    body: PairRequest,
+    public_key_bytes: bytes,
+    session: AsyncSession,
+    settings: Settings,
 ) -> PairingRequestRow:
     owner_id = None
     for candidate in (await session.scalars(select(User).order_by(User.created_at))).all():
@@ -70,6 +168,14 @@ async def _new_request(
     )
     session.add(pairing_request)
     await session.flush()
+    if settings.pairing_auto_approve and owner_id is not None:
+        await apply_pairing_decision(
+            session,
+            settings,
+            pairing_request,
+            approved=True,
+            actor_user_id=owner_id,
+        )
     return pairing_request
 
 
@@ -129,7 +235,7 @@ async def pair_device(
             status_code=409,
         )
     if pairing_request is None:
-        pairing_request = await _new_request(body, der_bytes, session)
+        pairing_request = await _new_request(body, der_bytes, session, settings)
         await session.commit()
 
     if pairing_request.status == "rejected":

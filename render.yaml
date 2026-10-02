@@ -113,6 +113,8 @@ services:
       - key: ASHNA_API_KEY
         sync: false
       # Optional overrides (documented defaults shown).
+      # - key: PAIRING_AUTO_APPROVE
+      #   value: "false"
       # - key: ASHNA_BASE_URL
       #   value: https://api.ashna.ai/v1/api
       # - key: ASHNA_MODEL

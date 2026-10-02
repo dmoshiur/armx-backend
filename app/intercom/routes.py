@@ -110,7 +110,7 @@ def _serialize(
         from_user_id=public_user_id(sender) if sender else "",
         from_name=(sender.display_name or sender.username) if sender else "Unknown sender",
         scope=row.scope,
-        target_user_id=target_user_id,
+        target_user_id=target_user_id or "",
         target_label=row.target_label,
         audio_url=_audio_url(request, row.id, settings),
         duration_ms=row.duration_ms,
@@ -231,13 +231,17 @@ async def list_recipients(
     recipients: list[RecipientResponse] = []
     for device, user, consent in rows:
         last_seen = _as_utc(device.last_seen_at)
+        user_label = user.display_name or user.username
+        primary_role = str(user.roles[0]) if user.roles else "user"
         recipients.append(
             RecipientResponse(
                 id=public_device_id(device),
                 device_id=public_device_id(device),
                 name=device.name,
                 user_id=public_user_id(user),
-                user_display_name=user.display_name or user.username,
+                user_display_name=user_label,
+                display_name=device.name or user_label,
+                role=primary_role,
                 consented=bool(consent and consent.enabled),
                 online=bool(last_seen and last_seen >= now - timedelta(seconds=90)),
                 last_seen_at=device.last_seen_at,
@@ -623,6 +627,7 @@ async def create_announcement(
 @router.get("/announcements", response_model=list[AnnouncementResponse])
 async def list_announcements(
     request: Request,
+    target_user_id: str = "",
     principal: Principal = Depends(require_principal),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -645,6 +650,7 @@ async def list_announcements(
         )
         scoped_user_id = principal.user.id
 
+    filter_target = target_user_id.strip()
     responses: list[AnnouncementResponse] = []
     for announcement, sender in result.all():
         deliveries = await _load_deliveries(session, announcement.id, user_id=scoped_user_id)
@@ -653,6 +659,9 @@ async def list_announcements(
             if announcement.target_user_id
             else None
         )
+        resolved_target_id = public_user_id(target) if target else ""
+        if filter_target and resolved_target_id != filter_target:
+            continue
         responses.append(
             _serialize(
                 announcement,
@@ -660,7 +669,7 @@ async def list_announcements(
                 deliveries,
                 request,
                 settings,
-                target_user_id=public_user_id(target) if target else None,
+                target_user_id=resolved_target_id,
             )
         )
     return responses

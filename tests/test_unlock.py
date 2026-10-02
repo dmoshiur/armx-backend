@@ -143,6 +143,7 @@ async def test_unlock_uses_documented_signature_fields_and_consumes_nonce() -> N
         outcome = await client.post("/unlock/request", headers=headers, json=body)
         assert outcome.status_code == 200
         assert outcome.json()["status"] == "FAILED"
+        assert outcome.json()["at"]
         assert "not connected" in outcome.json()["message"].lower()
 
         replay_body = {**body, "assertion": _owner_assertion(harness)}

@@ -72,6 +72,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning(
                 "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."
             )
+        if configured.pairing_auto_approve:
+            logger.warning(
+                "PAIRING_AUTO_APPROVE=true: new Ed25519 device pairings will be approved "
+                "automatically once the client signs the challenge."
+            )
         if configured.jwt_secret_was_generated:
             logger.warning(
                 "JWT_SECRET_KEY was not supplied; sessions and encrypted pairing credentials "
