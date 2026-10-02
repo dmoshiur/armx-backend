@@ -154,8 +154,13 @@ def test_secure_profile_requires_tls_for_database_and_llm() -> None:
         Settings(**{**base, "database_url": "sqlite+libsql:///./armx.db"})
 
     with pytest.raises(ValidationError):
-        Settings(**{**base, "database_url": "libsql://armx.turso.io?secure=true",
-                    "ollama_base_url": "http://model.example.test:11434"})
+        Settings(
+            **{
+                **base,
+                "database_url": "libsql://armx.turso.io?secure=true",
+                "ollama_base_url": "http://model.example.test:11434",
+            }
+        )
 
     with pytest.raises(ValidationError):
         Settings(**{**base, "database_url": "libsql://armx.turso.io?secure=false"})
