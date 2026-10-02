@@ -102,22 +102,26 @@ async def request_unlock(
     issued_at = _parse_datetime(body.issued_at)
     expires_at = _parse_datetime(body.exp)
     now = datetime.now(UTC)
-    if expires_at - issued_at > timedelta(seconds=settings.unlock_token_ttl_seconds):
+    max_ttl = timedelta(seconds=settings.unlock_token_ttl_seconds)
+    if expires_at <= issued_at or expires_at - issued_at > max_ttl:
         raise APIError(
             "token_ttl_too_long", "Unlock token TTL must not exceed 30 seconds", status_code=400
+        )
+    if expires_at > now + max_ttl + timedelta(seconds=5):
+        raise APIError(
+            "token_ttl_too_long", "Unlock token expiry is too far in the future", status_code=400
         )
     if issued_at > now.replace(microsecond=0) + timedelta(seconds=5):
         raise APIError("bad_signature", "Unlock token issue time is invalid", status_code=400)
 
+    # docs/api.md defines the canonical signature object; timestamps, algorithm, and key
+    # are validated separately, while device binding ensures only the paired key is accepted.
     signed_data = canonical_json_bytes(
         {
-            "action": body.action,
-            "algorithm": body.algorithm,
             "device_id": body.device_id,
-            "exp": body.exp,
-            "issued_at": body.issued_at,
             "nonce": body.nonce,
-            "public_key": body.public_key,
+            "exp": body.exp,
+            "action": body.action,
         }
     )
     if not verify_ed25519_signature(body.public_key, body.signature, signed_data):

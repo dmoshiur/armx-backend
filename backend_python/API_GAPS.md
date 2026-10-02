@@ -26,16 +26,14 @@ demo can be claimed. REST errors use `{code, message, retryable, request_id}`.
    device credential once. There is no HTTP owner-approval/rejection route. The Flutter
    pairing client must be changed or the backend protocol must be reconciled first.
 
-2. **Unlock request signature fields and assertion requirement differ.** The documented
-   signature covers canonical JSON `{device_id, nonce, exp, action}` and the `assertion` is
-   optional. The backend requires `issued_at`, `algorithm`, `public_key`, a detached signature
-   over `{action, algorithm, device_id, exp, issued_at, nonce, public_key}`, and a valid
-   single-use HIGH-risk `owner_verified` assertion. The backend currently binds the outer
-   signature to the authenticated requesting device's public key; the contract does not
-   specify that binding. A timestamp must be timezone-aware and within the clock tolerance,
-   and unlock TTL is at most 30 seconds. These canonicalization, key-binding, required-field,
-   and assertion decisions need to be adopted in the client contract before unlock requests
-   can be sent by Flutter.
+2. **Unlock request requires stricter verification than the documented optional assertion.**
+   The backend now verifies the detached signature over the exact canonical JSON object
+   documented by `docs/api.md`: `{device_id, nonce, exp, action}`. It also validates the
+   timezone-aware `issued_at`/`exp` fields, algorithm, and that `public_key` matches the
+   authenticated requesting device. However, `assertion` remains mandatory because unlock is
+   HIGH risk under the server-authoritative policy; the Flutter contract calls it optional.
+   The device-key binding and stricter expiry checks are security interpretations that should
+   be recorded in the client contract. Raw biometrics remain forbidden.
 
 3. **Device commands require an extra verification field and have a different result
    message.** `POST /devices/{id}/command` requires an `owner_verified` signed assertion in

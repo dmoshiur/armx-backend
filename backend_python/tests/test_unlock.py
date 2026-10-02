@@ -68,7 +68,8 @@ def _unlock_request(
         "nonce": token_urlsafe(18),
         "public_key": _public_key(harness),
     }
-    signature = base64.b64encode(harness.private_key.sign(canonical_json_bytes(unsigned))).decode(
+    signed = {name: unsigned[name] for name in ("device_id", "nonce", "exp", "action")}
+    signature = base64.b64encode(harness.private_key.sign(canonical_json_bytes(signed))).decode(
         "ascii"
     )
     body: dict[str, object] = {**unsigned, "signature": signature}
@@ -78,10 +79,7 @@ def _unlock_request(
 
 
 def _resign(harness: Harness, body: dict[str, object]) -> dict[str, object]:
-    signed = {
-        name: body[name]
-        for name in ("action", "algorithm", "device_id", "exp", "issued_at", "nonce", "public_key")
-    }
+    signed = {name: body[name] for name in ("device_id", "nonce", "exp", "action")}
     return {
         **body,
         "signature": base64.b64encode(
@@ -121,7 +119,7 @@ def _target(
 
 
 @pytest.mark.asyncio
-async def test_unlock_binds_issued_at_consumes_nonce_and_never_claims_actuation() -> None:
+async def test_unlock_uses_documented_signature_fields_and_consumes_nonce() -> None:
     harness = await _harness()
     async with harness.factory() as session:
         owner = await session.scalar(select(User).where(User.username == "owner"))
@@ -136,7 +134,7 @@ async def test_unlock_binds_issued_at_consumes_nonce_and_never_claims_actuation(
         body = _unlock_request(harness)
         tampered = {
             **body,
-            "issued_at": (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+            "exp": (datetime.now(UTC) + timedelta(seconds=21)).isoformat().replace("+00:00", "Z"),
         }
         mismatch = await client.post("/unlock/request", headers=headers, json=tampered)
         assert mismatch.status_code == 400
