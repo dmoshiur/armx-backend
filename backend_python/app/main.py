@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -13,9 +15,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.core.errors import APIError
-from app.db.session import get_session
+from app.db.bootstrap import initialize_database_state
+from app.db.session import dispose_engine, get_session
+from app.pairing.routes import router as pairing_router
 
 logger = logging.getLogger("armx")
 _SERVER_VERSION = "0.1.0"
@@ -48,12 +53,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build a minimal ASGI service with database health and a stable error envelope."""
 
     configured = settings or get_settings()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if configured.demo_insecure:
+            logger.warning(
+                "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."
+            )
+        await initialize_database_state(configured)
+        try:
+            yield
+        finally:
+            await dispose_engine()
+
     application = FastAPI(
         title=configured.app_name,
         version=_SERVER_VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
 
     @application.middleware("http")
@@ -127,6 +146,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             at=datetime.now(UTC),
         )
 
+    application.include_router(auth_router)
+    application.include_router(pairing_router)
     return application
 
 
