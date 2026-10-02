@@ -65,6 +65,10 @@ async def _harness() -> Harness:
         jwt_secret_key="test-signing-key-that-is-long-enough-012345",
         access_token_ttl_seconds=600,
         refresh_token_ttl_seconds=3600,
+        # The default provider is Ashna AI (requires ASHNA_API_KEY). Tests that do not
+        # exercise the LLM pin the offline local fallback instead; Ashna-specific tests
+        # override these settings explicitly.
+        llm_provider="ollama",
     )
     engine = create_database_engine(url)
     async with engine.begin() as connection:

@@ -47,3 +47,60 @@ never leave the device (AGENTS.md rule 3).
 
 See [`docs/deploy-render.md`](docs/deploy-render.md) for the deployment runbook (Turso
 database, env vars, first deploy, WebSocket verification, and the free-vs-paid tier decision).
+
+## LLM provider (Ashna AI)
+
+The chat router (`app/chat/`) is pluggable. The default provider is **Ashna AI's hosted
+`ashna-x1` model** (`LLM_PROVIDER=ashna`); `ollama` and `openai_compatible` remain available
+behind the same env var for local development and offline fallback.
+
+Ashna AI's API is **OpenAI Chat Completions-compatible** (verified against the official
+reference at <https://www.ashna.ai/api-docs>), so the adapter reuses the router's
+OpenAI-compatible mapping rather than a bespoke client:
+
+* Base URL: `https://api.ashna.ai/v1/api` → `POST /chat/completions`
+* Auth: `Authorization: Bearer <ASHNA_API_KEY>` (the key is env-only and redacted from logs)
+* Model id: `ashna-x1`
+* Errors: OpenAI envelope `{ "error": { "message", "type", "code", "param" } }`
+
+### Getting an API key
+
+1. Sign in to <https://app.ashna.ai>.
+2. Open **Account → API** (<https://app.ashna.ai/account?tab=api>) and create a key.
+3. Set it as `ASHNA_API_KEY` in the environment (never in code or in the repo).
+
+### Environment variables
+
+| Variable          | Default                         | Purpose                                             |
+| ----------------- | ------------------------------- | --------------------------------------------------- |
+| `LLM_PROVIDER`    | `ashna`                         | `ashna`, `ollama`, or `openai_compatible`           |
+| `ASHNA_API_KEY`   | —                               | Required when `LLM_PROVIDER=ashna`; startup fails with a clear error if unset (no silent fallback) |
+| `ASHNA_BASE_URL`  | `https://api.ashna.ai/v1/api`   | Ashna OpenAI-compatible base URL                    |
+| `ASHNA_MODEL`     | `ashna-x1`                      | Foundation model id sent as `model`                 |
+| `LLM_TIMEOUT_SECONDS` | `60`                        | Per-request timeout for every provider              |
+
+Retries: up to 3 attempts with exponential backoff, only for rate-limit (429), server
+(5xx), and transport/timeout failures — never for 4xx client errors.
+
+### Local development without an Ashna key
+
+Set `LLM_PROVIDER=ollama` and run a local Ollama (Docker Compose wires the `ollama`
+service container for you), or point `LLM_PROVIDER=openai_compatible` at any
+OpenAI-compatible endpoint. This keeps the backend fully functional offline.
+
+### Implemented behavior (tool calling & streaming)
+
+* **Tool calling is native.** `ashna-x1` supports OpenAI-style client tools, so the router
+  sends the MCP tool schemas as `tools` with `tool_choice: "auto"` and parses the returned
+  `tool_calls`. No prompt-based JSON fallback is needed (the Ollama path also passes `tools`
+  through). Proposed calls are still only proposals: nothing executes until the explicit
+  confirmation step with fresh signed verification (AGENTS.md rule 6).
+* **Streaming:** the Ashna adapter translates Ashna's OpenAI SSE stream (`stream: true`,
+  chunks ending in `data: [DONE]`, tool-call deltas) into the router's internal token-stream
+  shape. The WebSocket contract is unchanged either way: the client receives
+  `assistant.token` events followed by `assistant.done` (and `tool.request` for proposals),
+  exactly as before.
+* **Untrusted content** fetched from GitHub/email/external sources is passed to the model
+  only inside explicit `<<<UNTRUSTED_EXTERNAL_CONTENT>>>` delimiters as data, never merged
+  into the system/instruction prompt (AGENTS.md rule 7; see
+  `app/chat/llm_core.py:delimit_untrusted_content`).
