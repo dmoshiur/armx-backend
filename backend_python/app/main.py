@@ -59,10 +59,9 @@ def _error_body(request: Request, code: str, message: str, retryable: bool) -> d
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build a minimal ASGI service with database health and a stable error envelope."""
+    """Build the ASGI app, allowing isolated environment-backed settings in tests."""
 
     configured = settings or get_settings()
-
     stop_background = asyncio.Event()
     background_tasks: list[asyncio.Task[None]] = []
 
@@ -71,6 +70,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if configured.demo_insecure:
             logger.warning(
                 "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."
+            )
+        if configured.jwt_secret_was_generated:
+            logger.warning(
+                "JWT_SECRET_KEY was not supplied; sessions and encrypted pairing credentials "
+                "will not survive a process restart. Set a persistent secret."
             )
         await initialize_database_state(configured)
         stop_background.clear()
@@ -138,7 +142,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         code, message = (
             ("not_found", "Resource was not found")
             if exc.status_code == 404
-            else ("http_error", "Request could not be completed")
+            else (
+                "http_error",
+                "Request could not be completed",
+            )
         )
         return JSONResponse(
             status_code=exc.status_code,
