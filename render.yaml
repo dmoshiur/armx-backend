@@ -20,13 +20,16 @@ services:
     name: armx-backend
     runtime: python
     # Free is fine for a supervised demo only; upgrade to the smallest paid instance
-    # (``0.5c-512mb``, Render's ~$7/mo Starter tier) for the always-on science-fair run.
-    # See docs/deploy-render.md for the warm-up options if you stay free.
+    # (``0.5c-512mb``, $7/mo, verified on Render's pricing page 2026-10-02) for the
+    # always-on science-fair run. See docs/deploy-render.md for the warm-up options if you
+    # stay free.
     plan: free
     # Keep this in the same region as the Turso database (``sin`` = Singapore) to avoid a
     # round-the-world hop on every statement.
     region: singapore
-    rootDir: backend_python
+    # No ``rootDir``: the FastAPI app, Alembic files, and pyproject.toml live at the
+    # repository root of this backend repo (the earlier ``backend_python/`` layout was
+    # flattened in commit 20af65c). A stale rootDir makes a Blueprint deploy fail.
     healthCheckPath: /health
     autoDeployTrigger: commit
     buildCommand: python -m pip install --upgrade pip && python -m pip install .
@@ -34,8 +37,11 @@ services:
     # On a paid plan with more than one instance, move ``alembic upgrade head`` to
     # preDeployCommand so exactly one instance migrates per deploy.
     # --proxy-headers + --forwarded-allow-ips let uvicorn trust Render's TLS-terminating
-    # proxy, so the app sees https/wss for external clients. The WebSocket ping interval
-    # (20 s) stays well below Render's idle window; the app-level heartbeat adds 25 s.
+    # proxy, so the app sees https/wss for external clients. The WebSocket ping (20 s) and
+    # the app-level heartbeat (25 s) keep an *active* socket healthy and detect dead peers,
+    # but note they are server-to-client frames: Render's free-tier idle timer counts
+    # *inbound* traffic only, so pair them with client-side activity and/or an external
+    # pinger on /health (see docs/deploy-render.md).
     startCommand: >-
       alembic upgrade head &&
       uvicorn app.main:app --host 0.0.0.0 --port $PORT
@@ -82,8 +88,11 @@ services:
       # request keeps requiring TLS. See app/main.py and docs/deploy-render.md.
       - key: ALLOW_PLAIN_HTTP_HEALTH_PROBE
         value: "true"
-      # External MQTT broker (e.g. HiveMQ Cloud Serverless). ESP32 devices connect to the
-      # same broker over MQTT/TLS 8883; this backend only connects *out* to it.
+      # External MQTT broker. The documented deployment choice is HiveMQ Cloud Serverless
+      # (free tier, TLS-only on 8883); a self-hosted Mosquitto with a publicly trusted
+      # certificate also works. ESP32 devices connect to the same broker over MQTT/TLS
+      # 8883; this backend only connects *out* to it. MQTT_TLS_CA_FILE stays unset so the
+      # system CA store validates the managed broker's certificate.
       - key: MQTT_ENABLED
         value: "true"
       - key: MQTT_HOST
