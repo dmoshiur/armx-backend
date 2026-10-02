@@ -26,6 +26,7 @@ from app.db.session import dispose_engine, get_session
 from app.devices.routes import router as devices_router
 from app.devices.state_listener import mark_stale_devices_offline, mqtt_state_listener
 from app.pairing.routes import router as pairing_router
+from app.unlock.routes import router as unlock_router
 from app.ws.routes import router as websocket_router
 
 logger = logging.getLogger("armx")
@@ -172,6 +173,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(devices_router)
     application.include_router(admin_router)
     application.include_router(audit_router)
+    application.include_router(unlock_router)
     application.include_router(websocket_router)
     return application
 
