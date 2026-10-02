@@ -1,0 +1,131 @@
+# Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-demo}
+      DEMO_INSECURE: ${DEMO_INSECURE:-true}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://armx@postgres:5432/armx}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env before starting Compose}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-mohiur}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env before starting Compose}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-owner@thamjj13.top}
+      BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-Md. Moshiur Rahman Mohi}
+      MQTT_ENABLED: ${MQTT_ENABLED:-true}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_TLS_CA_FILE: /run/armx/mqtt-ca/server.crt
+      INTERCOM_ENABLED: ${INTERCOM_ENABLED:-true}
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - mosquitto-ca:/run/armx/mqtt-ca:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mqtt-cert-init:
+        condition: service_completed_successfully
+      mosquitto:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: armx
+      POSTGRES_USER: armx
+      # Trust is limited to this private Compose network for the disposable demo profile.
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U armx -d armx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mqtt-cert-init:
+    image: alpine:3.21
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        apk add --no-cache openssl >/dev/null
+        if [ ! -s /broker-certs/server.crt ] || [ ! -s /broker-certs/server.key ]; then
+          openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
+            -keyout /broker-certs/server.key \
+            -out /broker-certs/server.crt \
+            -subj "/CN=mosquitto" \
+            -addext "subjectAltName=DNS:mosquitto" \
+            -addext "basicConstraints=critical,CA:TRUE"
+        fi
+        chown 1883:1883 /broker-certs/server.crt /broker-certs/server.key
+        chmod 644 /broker-certs/server.crt
+        chmod 640 /broker-certs/server.key
+        cp /broker-certs/server.crt /ca/server.crt
+        chmod 644 /ca/server.crt
+    volumes:
+      - mosquitto-certs:/broker-certs
+      - mosquitto-ca:/ca
+    restart: "no"
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-certs:/mosquitto/certs:ro
+      - mosquitto-data:/mosquitto/data
+    depends_on:
+      mqtt-cert-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - mosquitto_pub
+        - -h
+        - mosquitto
+        - -p
+        - "8883"
+        - --cafile
+        - /mosquitto/certs/server.crt
+        - -t
+        - armx/healthcheck
+        - -m
+        - ok
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mosquitto-certs:
+  mosquitto-ca:
+  mosquitto-data:
+  ollama-data:
