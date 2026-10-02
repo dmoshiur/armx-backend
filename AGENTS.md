@@ -21,8 +21,9 @@ every endpoint and WebSocket event shape this backend exposes.
 Python 3.12, FastAPI, native WebSockets, SQLAlchemy 2.x async + Alembic on Turso/libSQL
 (a local libSQL file for development via `DATABASE_URL`), `aiomqtt`/`paho-mqtt` with TLS to
 an external broker,
-`python-jose`/`PyJWT` + Argon2, `cryptography` (Ed25519), Ollama/OpenAI-compatible LLM
-router, `uvicorn`, Docker Compose. Full detail in `PROJECT_SPEC.md` and
+`python-jose`/`PyJWT` + Argon2, `cryptography` (Ed25519), pluggable LLM router
+(Ashna AI `ashna-x1` default / Ollama / OpenAI-compatible), `uvicorn`, Docker Compose.
+Full detail in `PROJECT_SPEC.md` and
 `PROMPT_05_BACKEND_FASTAPI.md` if present in this repo.
 
 ## NON-NEGOTIABLE RULES (apply to every task, including fixes)

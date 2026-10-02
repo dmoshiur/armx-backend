@@ -85,7 +85,12 @@ class Settings(BaseSettings):
     mqtt_client_id: str = "armx-backend"
     mqtt_keepalive_seconds: int = Field(default=30, ge=5, le=600)
 
-    llm_provider: Literal["ollama", "openai_compatible"] = "ollama"
+    llm_provider: Literal["ashna", "ollama", "openai_compatible"] = "ashna"
+    # Ashna AI hosted model (OpenAI-compatible API; docs: https://www.ashna.ai/api-docs).
+    # The key comes only from ASHNA_API_KEY and is never logged (AGENTS.md rule 9).
+    ashna_api_key: SecretStr | None = Field(default=None, repr=False)
+    ashna_base_url: str = "https://api.ashna.ai/v1/api"
+    ashna_model: str = "ashna-x1"
     ollama_base_url: str = "https://localhost:11434"
     ollama_model: str = "qwen2.5:3b"
     openai_compatible_base_url: str | None = None
@@ -145,8 +150,7 @@ class Settings(BaseSettings):
         if self.environment in {"staging", "production"} and (
             backend is DatabaseBackend.AIOSQLITE
             or (
-                backend is DatabaseBackend.LIBSQL
-                and not libsql_target_is_remote(self.database_url)
+                backend is DatabaseBackend.LIBSQL and not libsql_target_is_remote(self.database_url)
             )
         ):
             raise ValueError(
@@ -195,6 +199,18 @@ class Settings(BaseSettings):
                         "CORS_ALLOWED_ORIGINS entries must be absolute origins "
                         "(no path, query, or wildcard)"
                     )
+        if self.llm_provider == "ashna":
+            # Fail startup loudly instead of silently falling back to another provider.
+            if self.ashna_api_key is None or not self.ashna_api_key.get_secret_value().strip():
+                raise ValueError(
+                    "ASHNA_API_KEY is required when LLM_PROVIDER=ashna; create a key at "
+                    "https://app.ashna.ai/account?tab=api. For local/offline development "
+                    "set LLM_PROVIDER=ollama or LLM_PROVIDER=openai_compatible instead."
+                )
+            if not self.ashna_model.strip():
+                raise ValueError("ASHNA_MODEL must not be empty when LLM_PROVIDER=ashna")
+            if not _safe_http_endpoint(self.ashna_base_url, require_tls=not explicit_demo):
+                raise ValueError("ASHNA_BASE_URL must be a safe HTTPS endpoint outside demo mode")
         if self.llm_provider == "ollama" and not _safe_http_endpoint(
             self.ollama_base_url, require_tls=not explicit_demo
         ):
