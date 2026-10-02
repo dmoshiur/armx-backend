@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 class RequestModel(BaseModel):
@@ -25,12 +25,37 @@ class LoginRequest(RequestModel):
     client_version: str = Field(min_length=1, max_length=48)
 
 
+class RegisterRequest(RequestModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    email: str = Field(min_length=5, max_length=254)
+    display_name: str = Field(min_length=1, max_length=160)
+    password: SecretStr = Field(min_length=12, max_length=256)
+    public_key: str = Field(min_length=40, max_length=256)
+    device_name: str = Field(min_length=1, max_length=120)
+    platform: str = Field(min_length=1, max_length=32)
+    client_version: str = Field(min_length=1, max_length=48)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        import re
+
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
+            raise ValueError("A valid email address is required")
+        return normalized
+
+
 class LoginResponse(BaseModel):
     access_token: str
     refresh_token: str
     expires_at: datetime
     device_id: str
     user: UserProfileResponse
+
+
+class RegisterResponse(LoginResponse):
+    device_key: str
 
 
 class RefreshRequest(RequestModel):

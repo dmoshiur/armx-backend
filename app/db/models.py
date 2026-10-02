@@ -166,6 +166,10 @@ class SystemState(Base):
     __tablename__ = "system_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    first_admin_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    initial_admin_claimed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     assistant_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     kill_switch_engaged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(

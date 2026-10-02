@@ -47,6 +47,26 @@ async def initialize_database_state(settings: Settings | None = None) -> None:
             )
             if existing_owner is None:
                 logger.warning(
-                    "No bootstrap owner is configured; set BOOTSTRAP_ADMIN_PASSWORD before login."
+                    "No bootstrap administrator is configured; the first registered account "
+                    "will receive the initial administrator role."
                 )
+        await session.flush()
+        system_state = await session.get(SystemState, 1)
+        if system_state is not None and system_state.first_admin_user_id is None:
+            owners = (
+                await session.scalars(select(User).order_by(User.created_at, User.id))
+            ).all()
+            owner = next(
+                (
+                    candidate
+                    for candidate in owners
+                    if {role.lower() for role in candidate.roles}.intersection(
+                        {"owner", "admin"}
+                    )
+                ),
+                None,
+            )
+            if owner is not None:
+                system_state.first_admin_user_id = owner.id
+                system_state.initial_admin_claimed = True
         await session.commit()
