@@ -21,6 +21,7 @@ from app.core.errors import APIError
 from app.db.bootstrap import initialize_database_state
 from app.db.session import dispose_engine, get_session
 from app.pairing.routes import router as pairing_router
+from app.ws.routes import router as websocket_router
 
 logger = logging.getLogger("armx")
 _SERVER_VERSION = "0.1.0"
@@ -148,6 +149,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     application.include_router(auth_router)
     application.include_router(pairing_router)
+    application.include_router(websocket_router)
     return application
 
 
