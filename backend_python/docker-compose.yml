@@ -8,7 +8,11 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-demo}
       DEMO_INSECURE: ${DEMO_INSECURE:-true}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://armx@postgres:5432/armx}
+      # Local libSQL file (the same dialect path used against Turso); persisted in the
+      # backend-data volume. Point DATABASE_URL at a remote libsql:// URL plus
+      # TURSO_AUTH_TOKEN to develop against a real Turso database instead.
+      DATABASE_URL: ${DATABASE_URL:-sqlite+libsql:////app/data/armx.db}
+      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env before starting Compose}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-mohiur}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env before starting Compose}
@@ -25,10 +29,9 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
+      - backend-data:/app/data
       - mosquitto-ca:/run/armx/mqtt-ca:ro
     depends_on:
-      postgres:
-        condition: service_healthy
       mqtt-cert-init:
         condition: service_completed_successfully
       mosquitto:
@@ -45,22 +48,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: armx
-      POSTGRES_USER: armx
-      # Trust is limited to this private Compose network for the disposable demo profile.
-      POSTGRES_HOST_AUTH_METHOD: trust
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U armx -d armx"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
     restart: unless-stopped
 
   mqtt-cert-init:
@@ -124,7 +111,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres-data:
+  backend-data:
   mosquitto-certs:
   mosquitto-ca:
   mosquitto-data:

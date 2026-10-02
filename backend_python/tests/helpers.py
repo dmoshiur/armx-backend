@@ -1,22 +1,46 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
 import base64
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from secrets import token_urlsafe
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import Settings, get_settings
 from app.core.security import hash_device_key, hash_password
 from app.db.base import Base
+from app.db.engine import create_database_engine
 from app.db.models import Device, User
 from app.db.session import get_session
+from app.db.urls import DatabaseBackend, database_backend, normalize_database_url
 from app.main import create_app
+
+# The suite runs on aiosqlite by default and can be pointed at the libSQL dialect with
+# ``ARMX_TEST_DATABASE_URL`` (``sqlite+libsql:////tmp/armx-test.db``) to exercise the code path
+# used against Turso.  In-memory databases are excluded because each pooled libSQL connection
+# would otherwise get its own empty database.
+_TEST_DATABASE_URL = os.environ.get("ARMX_TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+
+def database_url_for_tests() -> str:
+    """Return a per-run database URL, creating a scratch file for libSQL runs."""
+
+    url = normalize_database_url(_TEST_DATABASE_URL)
+    if database_backend(url) is DatabaseBackend.LIBSQL:
+        if ":memory:" in url:
+            raise RuntimeError(
+                "ARMX_TEST_DATABASE_URL must point at a file for libSQL runs; "
+                "use sqlite+libsql:////tmp/armx-test.db"
+            )
+        return url
+    return _TEST_DATABASE_URL
 
 
 @dataclass
@@ -30,6 +54,10 @@ class Harness:
 
 
 async def _harness() -> Harness:
+    url = database_url_for_tests()
+    if database_backend(url) is DatabaseBackend.LIBSQL:
+        path = url.split("///", 1)[-1]
+        Path(path).unlink(missing_ok=True)
     settings = Settings(
         _env_file=None,
         environment="demo",
@@ -38,7 +66,7 @@ async def _harness() -> Harness:
         access_token_ttl_seconds=600,
         refresh_token_ttl_seconds=3600,
     )
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_database_engine(url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -67,7 +95,11 @@ async def _harness() -> Harness:
         last_seen_at=datetime.now(UTC),
     )
     async with factory() as session:
-        session.add_all([user, device])
+        # Foreign keys are enforced on every supported backend, so the owner is flushed
+        # before the device that references it.
+        session.add(user)
+        await session.flush()
+        session.add(device)
         await session.commit()
 
     application = create_app(settings)

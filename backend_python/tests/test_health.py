@@ -21,16 +21,23 @@ class _StubSession:
             raise SQLAlchemyError("sensitive db connection details")
 
 
-def _make_app(*, session: _StubSession | None = None, insecure: bool = True):
+def _make_app(
+    *,
+    session: _StubSession | None = None,
+    insecure: bool = True,
+    allow_plain_http_health_probe: bool = False,
+):
     settings = Settings(
         _env_file=None,
         environment="demo" if insecure else "production",
         demo_insecure=insecure,
+        allow_plain_http_health_probe=allow_plain_http_health_probe,
         database_url=(
             "sqlite+aiosqlite:///./test.db"
             if insecure
-            else "postgresql+asyncpg://user:pass@localhost/armx?ssl=require"
+            else "sqlite+libsql://armx-demo.turso.io?secure=true"
         ),
+        turso_auth_token=None if insecure else "test-turso-token",
         public_api_base_url=None if insecure else "https://api.example.test",
         jwt_secret_key="t" * 32,
     )
@@ -102,6 +109,24 @@ async def test_non_demo_profile_rejects_plain_http_with_error_envelope() -> None
     assert response.headers["x-request-id"] == response.json()["request_id"]
 
 
+@pytest.mark.asyncio
+async def test_platform_health_probe_is_the_only_plain_http_exception() -> None:
+    """Render probes GET /health over plain HTTP; every other request still needs TLS."""
+
+    application = _make_app(insecure=False, allow_plain_http_health_probe=True)
+    async with AsyncClient(
+        transport=ASGITransport(app=application), base_url="http://testserver"
+    ) as client:
+        probe = await client.get("/health")
+        other_route = await client.get("/devices")
+        non_get_probe = await client.post("/health")
+
+    assert probe.status_code == 200
+    for rejected in (other_route, non_get_probe):
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "tls_required"
+
+
 def test_production_cannot_enable_demo_insecure() -> None:
     with pytest.raises(ValidationError):
         Settings(
@@ -118,16 +143,28 @@ def test_secure_profile_requires_tls_for_database_and_llm() -> None:
         "environment": "production",
         "jwt_secret_key": "b" * 32,
         "public_api_base_url": "https://api.example.test",
-        "database_url": "postgresql+asyncpg://user:pass@db.example.test/armx",
+        "database_url": "sqlite+libsql://armx.turso.io",
+        "turso_auth_token": "test-turso-token",
     }
     with pytest.raises(ValidationError):
-        Settings(**base)
+        Settings(**base)  # remote libSQL without an explicit TLS flag
+
+    with pytest.raises(ValidationError):
+        # A local libSQL file is still an ephemeral-disk database in deployed profiles.
+        Settings(**{**base, "database_url": "sqlite+libsql:///./armx.db"})
+
+    with pytest.raises(ValidationError):
+        Settings(**{**base, "database_url": "libsql://armx.turso.io?secure=true",
+                    "ollama_base_url": "http://model.example.test:11434"})
+
+    with pytest.raises(ValidationError):
+        Settings(**{**base, "database_url": "libsql://armx.turso.io?secure=false"})
 
     with pytest.raises(ValidationError):
         Settings(
             **{
                 **base,
-                "database_url": "postgresql+asyncpg://user:pass@db.example.test/armx?ssl=require",
+                "database_url": "libsql://armx.turso.io?secure=true",
                 "ollama_base_url": "http://model.example.test:11434",
             }
         )

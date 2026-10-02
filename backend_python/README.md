@@ -9,7 +9,10 @@ storage and dry runs, and TLS-only MQTT telemetry/command publishing. The publis
 contract at `dmoshiur/armx/docs/api.md` is authoritative; known additions and ambiguities are
 tracked in [`API_GAPS.md`](API_GAPS.md), not silently treated as contract guarantees.
 
-## Run locally (SQLite)
+Production runs on Render with Turso/libSQL and an external MQTT broker; the deployment
+runbook is in [`../docs/deploy-render.md`](../docs/deploy-render.md).
+
+## Run locally (local libSQL file)
 
 ```bash
 cd backend_python
@@ -18,6 +21,13 @@ python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
+
+The default `DATABASE_URL=sqlite+libsql:///./armx.db` uses the libSQL driver against a local
+file (the same dialect path used against Turso, so local and deployed behavior match). Point
+`DATABASE_URL` at a Turso URL (`libsql://<db>-<org>.turso.io`) plus `TURSO_AUTH_TOKEN` to run
+against a remote database; local SQLite files are rejected in `staging`/`production` because
+hosted filesystems are ephemeral. Use four slashes for an absolute local path
+(`sqlite+libsql:////abs/path.db`).
 
 Before first startup, set a persistent random `JWT_SECRET_KEY` and a strong
 `BOOTSTRAP_ADMIN_PASSWORD` in `.env`. Generate a signing secret without putting it in shell
@@ -50,12 +60,18 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose starts the API, PostgreSQL, an internal TLS-enabled Mosquitto broker, and Ollama;
-the API container applies migrations before serving. PostgreSQL and MQTT ports are not
-published to the host. The disposable demo Postgres configuration trusts connections only
-inside the private Compose network. The demo broker uses an ephemeral self-signed TLS
-certificate and anonymous clients on that same private network; this is **not** a production
-broker configuration. Do not connect untrusted containers to the Compose network.
+Compose starts the API, a TLS-enabled Mosquitto broker, and Ollama; the API container applies
+migrations before serving and stores the libSQL database file in a named volume, so nothing
+depends on Render-style ephemeral storage. Only the API port is published to the host; the
+database is a local file and the MQTT port is internal to the Compose network. The demo
+broker uses an ephemeral self-signed TLS certificate and anonymous clients on that same
+private network; it stands in for the external managed broker used in production and is
+**not** a production broker configuration. Do not connect untrusted containers to the
+Compose network.
+
+In production the broker is external: ESP32 devices and this backend both connect **out** to
+it over MQTT/TLS (typically port 8883), and Render never exposes a broker port. See
+[`../docs/deploy-render.md`](../docs/deploy-render.md).
 
 The API is at `http://localhost:8000`. To use the local model, pull it once:
 
@@ -210,22 +226,31 @@ per-person consent semantics. Rules are stored and dry-run only; they do not dis
 
 ## Deployed profile checklist
 
-This Compose file is a local/demo setup, not a production deployment template. Outside the
-explicit local/demo profile:
+This Compose file is a local/demo setup, not a production deployment template. The supported
+production shape is Render + Turso + an external MQTT broker
+([`../docs/deploy-render.md`](../docs/deploy-render.md)). Outside the explicit local/demo
+profile:
 
 - Set `ENVIRONMENT=staging` or `production`, `DEMO_INSECURE=false`, and use HTTPS/WSS through
-  a trusted TLS terminator. Configure the ASGI server to trust forwarded scheme headers only
-  from that proxy; the app does not trust caller-supplied forwarding headers directly.
-- Set `PUBLIC_API_BASE_URL` to the public HTTPS API origin, use PostgreSQL with
-  `DATABASE_URL=postgresql+asyncpg://.../armx?ssl=require` (or stronger certificate
-  verification), and provide a persistent random `JWT_SECRET_KEY` of at least 32 characters.
-  Use an HTTPS LLM endpoint outside explicit demo mode.
+  a trusted TLS terminator. Run the ASGI server so it trusts forwarded scheme headers from
+  that proxy (Render: `uvicorn ... --proxy-headers --forwarded-allow-ips='*'`; the platform
+  proxy is the only hop that can reach the container port). The platform's internal liveness
+  probe is plain HTTP, so `ALLOW_PLAIN_HTTP_HEALTH_PROBE=true` may be set on Render; it
+  excepts only a parameterless `GET /health`, while the platform edge keeps redirecting
+  public HTTP to HTTPS.
+- Set `PUBLIC_API_BASE_URL` to the public HTTPS API origin, use a remote Turso/libSQL URL
+  (`libsql://<db>-<org>.turso.io`) with `TURSO_AUTH_TOKEN`, and provide a persistent random
+  `JWT_SECRET_KEY` of at least 32 characters. Use an HTTPS LLM endpoint outside explicit demo
+  mode. A local SQLite file is rejected in these profiles because hosted filesystems are
+  ephemeral.
 - Set an owner password of at least 12 characters. Store all secrets in a secrets manager.
-- If MQTT is enabled, configure TLS CA validation, non-anonymous broker authentication, and
-  topic ACLs. Per-device MQTT attestation and command acknowledgements are not defined by the
-  current contract; do not treat broker telemetry as proof of physical execution.
-- Apply migrations as a controlled deployment step and verify backups, logging, network
-  policy, and retention before exposing user data.
+- Point MQTT at an external broker that the devices also use, with TLS CA validation (the
+  system CA store for managed brokers), non-anonymous authentication, and topic ACLs.
+  Per-device MQTT attestation and command acknowledgements are not defined by the current
+  contract; do not treat broker telemetry as proof of physical execution.
+- Apply migrations as a controlled deployment step (`alembic upgrade head`; on Render's free
+  tier the start command runs it, on paid multi-instance plans use `preDeployCommand`) and
+  verify backups, logging, network policy, and retention before exposing user data.
 
 ## Development checks
 
@@ -237,6 +262,9 @@ pytest -q
 alembic check
 ```
 
-SQLite is the default for local development; set `DATABASE_URL` to a supported
-`sqlite+aiosqlite://` or `postgresql+asyncpg://` URL as appropriate. See `API_GAPS.md` for
-protocol additions, missing contract schemas, and current transport assumptions.
+A local libSQL file is the default for development and tests; set `DATABASE_URL` to a remote
+`libsql://<db>-<org>.turso.io` URL (with `TURSO_AUTH_TOKEN`) to exercise Turso, or to
+`sqlite+aiosqlite://` for the plain SQLite driver. Set
+`ARMX_TEST_DATABASE_URL="sqlite+libsql:////tmp/armx-suite-test.db"` to run the test suite
+through the libSQL dialect. See `API_GAPS.md` for protocol additions, missing contract
+schemas, and current transport assumptions.

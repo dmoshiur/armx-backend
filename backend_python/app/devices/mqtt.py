@@ -37,7 +37,12 @@ async def publish_device_command(
     command: str,
     parameters: dict[str, Any],
 ) -> None:
-    """Publish a command over verified TLS; no insecure MQTT fallback exists."""
+    """Publish a command over verified TLS; no insecure MQTT fallback exists.
+
+    The broker is an external managed or self-hosted MQTT endpoint (the backend always
+    connects *out* to it), because the hosting platform exposes only its single HTTP(S)/WSS
+    port.  The topic contract (``armx/{site}/{device}/cmd``) is unchanged.
+    """
 
     if not settings.mqtt_enabled:
         raise APIError(
@@ -65,6 +70,7 @@ async def publish_device_command(
                 identifier=settings.mqtt_client_id,
                 username=username,
                 password=password,
+                keepalive=settings.mqtt_keepalive_seconds,
                 tls_context=_tls_context(settings),
             ) as client:
                 await client.publish(

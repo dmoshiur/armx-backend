@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -107,7 +108,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def enforce_tls_and_request_id(request: Request, call_next):  # type: ignore[no-untyped-def]
         request.state.request_id = uuid4().hex[:16]
         is_secure = request.url.scheme.lower() == "https"
-        if not configured.demo_insecure and not is_secure:
+        # The platform load balancer terminates TLS and forwards over plain HTTP; uvicorn is
+        # started with ``--proxy-headers --forwarded-allow-ips`` for exactly that hop, so an
+        # https scheme here means "the client used HTTPS".  The one documented exception is
+        # the platform's own liveness probe, which hits GET /health on the private network
+        # without a forwarding header.  Public HTTP is redirected to HTTPS at the platform
+        # edge before it reaches this service; the probe path returns no user data and needs
+        # no credentials, so it can be answered over the internal hop when the operator opts
+        # in with ALLOW_PLAIN_HTTP_HEALTH_PROBE=true.  Every other request still requires
+        # TLS outside the demo profile.
+        is_liveness_probe = (
+            configured.allow_plain_http_health_probe
+            and request.method == "GET"
+            and request.url.path == "/health"
+        )
+        if not configured.demo_insecure and not is_secure and not is_liveness_probe:
             response = JSONResponse(
                 status_code=400,
                 content=_error_body(request, "tls_required", "HTTPS is required", False),
@@ -119,6 +134,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
+
+    if configured.cors_origin_list:
+        # Browser origins are opt-in and explicit (Flutter web/desktop builds). Native
+        # mobile clients are unaffected. Added last so it is the outermost middleware and
+        # preflight requests are answered before the TLS check above.
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=configured.cors_origin_list,
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=[
+                "Authorization",
+                "Content-Type",
+                "X-Armx-Device-Key",
+                "X-Request-Id",
+            ],
+        )
 
     @application.exception_handler(APIError)
     async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:

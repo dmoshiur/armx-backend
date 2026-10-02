@@ -3,10 +3,19 @@
 from functools import lru_cache
 from secrets import token_urlsafe
 from typing import Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 from pydantic import Field, PrivateAttr, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.db.urls import (
+    DatabaseBackend,
+    database_backend,
+    libsql_requests_plaintext,
+    libsql_requests_tls,
+    libsql_target_is_remote,
+    normalize_database_url,
+)
 
 
 def _safe_http_endpoint(value: str, *, require_tls: bool) -> bool:
@@ -37,9 +46,23 @@ class Settings(BaseSettings):
     environment: Literal["local", "demo", "staging", "production"] = "local"
     demo_insecure: bool = False
 
-    database_url: str = Field(default="sqlite+aiosqlite:///./armx.db", repr=False)
+    database_url: str = Field(default="sqlite+libsql:///./armx.db", repr=False)
     database_echo: bool = False
+    database_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    # A pre-ping costs one extra round trip per checkout on a remote database; disable only
+    # if latency matters more than detecting a half-open connection.
+    database_pool_pre_ping: bool = True
+    turso_auth_token: SecretStr | None = Field(default=None, repr=False)
     public_api_base_url: str | None = None
+    # Comma-separated browser origins for Flutter web/desktop builds. Native mobile clients
+    # are unaffected by CORS; leave empty to keep all browser origins blocked.
+    cors_allowed_origins: str = ""
+    # Render's internal liveness probe reaches the container over plain HTTP with no
+    # forwarding header, while public HTTP is redirected to HTTPS at the platform edge.
+    # When true, only a parameterless GET /health is answered without TLS; every other
+    # request still requires HTTPS outside the demo profile. Enable it on the platform
+    # service, never on an instance that is reachable from an untrusted network directly.
+    allow_plain_http_health_probe: bool = False
 
     jwt_secret_key: SecretStr = Field(default=SecretStr(""), repr=False)
     bootstrap_admin_username: str = "mohiur"
@@ -60,6 +83,7 @@ class Settings(BaseSettings):
     mqtt_password: SecretStr | None = Field(default=None, repr=False)
     mqtt_tls_ca_file: str | None = None
     mqtt_client_id: str = "armx-backend"
+    mqtt_keepalive_seconds: int = Field(default=30, ge=5, le=600)
 
     llm_provider: Literal["ollama", "openai_compatible"] = "ollama"
     ollama_base_url: str = "https://localhost:11434"
@@ -87,6 +111,12 @@ class Settings(BaseSettings):
     def jwt_secret_was_generated(self) -> bool:
         return self._jwt_secret_generated
 
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Explicit browser origins parsed from the comma-separated setting."""
+
+        return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
     @model_validator(mode="after")
     def validate_deployment_profile(self) -> "Settings":
         if self.environment in {"staging", "production"} and self.demo_insecure:
@@ -104,20 +134,67 @@ class Settings(BaseSettings):
                     "JWT_SECRET_KEY must contain at least 32 characters in deployed profiles"
                 )
 
-        if self.environment in {"staging", "production"}:
-            if not self.database_url.startswith("postgresql+asyncpg://"):
-                raise ValueError("staging/production profiles require PostgreSQL")
-        elif not (
-            self.database_url.startswith("sqlite+aiosqlite://")
-            or self.database_url.startswith("postgresql+asyncpg://")
-        ):
-            raise ValueError("DATABASE_URL must use sqlite+aiosqlite or postgresql+asyncpg")
-
         explicit_demo = self.demo_insecure and self.environment in {"local", "demo"}
-        if self.database_url.startswith("postgresql+asyncpg://") and not explicit_demo:
-            ssl_mode = parse_qs(urlsplit(self.database_url).query).get("ssl", [""])[-1]
-            if ssl_mode not in {"require", "verify-ca", "verify-full"}:
-                raise ValueError("PostgreSQL DATABASE_URL must set ssl=require or stronger")
+        self.database_url = normalize_database_url(self.database_url)
+        backend = database_backend(self.database_url)
+        if backend is DatabaseBackend.UNSUPPORTED:
+            raise ValueError(
+                "DATABASE_URL must use sqlite+libsql (Turso) or sqlite+aiosqlite "
+                "(local development only)"
+            )
+        if self.environment in {"staging", "production"} and (
+            backend is DatabaseBackend.AIOSQLITE
+            or (
+                backend is DatabaseBackend.LIBSQL
+                and not libsql_target_is_remote(self.database_url)
+            )
+        ):
+            raise ValueError(
+                "staging/production require a remote Turso/libSQL database: the platform "
+                "filesystem is ephemeral, so a local SQLite file loses data on redeploy"
+            )
+        if backend is DatabaseBackend.LIBSQL and libsql_target_is_remote(self.database_url):
+            token = (
+                self.turso_auth_token.get_secret_value().strip()
+                if self.turso_auth_token is not None
+                else ""
+            )
+            if not token:
+                raise ValueError("TURSO_AUTH_TOKEN is required for a remote libSQL/Turso database")
+            if libsql_requests_plaintext(self.database_url) and not explicit_demo:
+                raise ValueError(
+                    "remote libSQL DATABASE_URL must use TLS (secure=true) outside demo mode"
+                )
+            if self.environment in {"staging", "production"} and not libsql_requests_tls(
+                self.database_url
+            ):
+                raise ValueError(
+                    "staging/production remote libSQL DATABASE_URL must set secure=true"
+                )
+
+        origins = self.cors_origin_list
+        if origins:
+            if "*" in origins:
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS must list explicit origins; wildcards are not allowed"
+                )
+            secure_profile = self.environment in {"staging", "production"}
+            for origin in origins:
+                parsed_origin = urlsplit(origin)
+                if (
+                    not parsed_origin.hostname
+                    or parsed_origin.username
+                    or parsed_origin.password
+                    or parsed_origin.query
+                    or parsed_origin.fragment
+                    or parsed_origin.path not in {"", "/"}
+                    or parsed_origin.scheme not in {"http", "https"}
+                    or (secure_profile and parsed_origin.scheme != "https")
+                ):
+                    raise ValueError(
+                        "CORS_ALLOWED_ORIGINS entries must be absolute origins "
+                        "(no path, query, or wildcard)"
+                    )
         if self.llm_provider == "ollama" and not _safe_http_endpoint(
             self.ollama_base_url, require_tls=not explicit_demo
         ):
