@@ -10,6 +10,8 @@ from app.admin.schemas import (
     AdminStateResponse,
     KillSwitchRequest,
     KillSwitchResponse,
+    PairingDecisionRequest,
+    PairingRequestSummary,
     RevokeDeviceRequest,
     ToolToggleRequest,
     ToolToggleResponse,
@@ -19,8 +21,16 @@ from app.auth.dependencies import Principal, public_device_id, require_admin
 from app.config import Settings, get_settings
 from app.core.errors import APIError
 from app.core.execution import execution_registry
-from app.db.models import AuthSession, Device, PendingToolCall, SystemState, ToolToggle
+from app.db.models import (
+    AuthSession,
+    Device,
+    PairingRequest,
+    PendingToolCall,
+    SystemState,
+    ToolToggle,
+)
 from app.db.session import get_session
+from app.pairing.routes import apply_pairing_decision
 from app.ws.manager import connection_manager
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -265,3 +275,70 @@ async def revoke_device(
     await session.commit()
     await connection_manager.close_device(target.id)
     return await _admin_state(session, principal, settings)
+
+
+@router.get("/pairing", response_model=list[PairingRequestSummary])
+async def list_pairing_requests(
+    principal: Principal = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> list[PairingRequestSummary]:
+    del principal
+    rows = (
+        await session.scalars(
+            select(PairingRequest)
+            .where(PairingRequest.status == "pending")
+            .order_by(PairingRequest.created_at.desc())
+        )
+    ).all()
+    return [
+        PairingRequestSummary(
+            device_id=row.device_public_id,
+            device_name=row.device_name,
+            platform=row.platform,
+            fingerprint=row.fingerprint,
+            status=row.status,
+            created_at=row.created_at,
+            expires_at=row.expires_at,
+        )
+        for row in rows
+    ]
+
+
+@router.post("/pairing/{device_id}/decision", response_model=PairingRequestSummary)
+async def decide_pairing_request(
+    device_id: str,
+    body: PairingDecisionRequest,
+    principal: Principal = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> PairingRequestSummary:
+    request = await session.scalar(
+        select(PairingRequest)
+        .where(PairingRequest.device_public_id == device_id)
+        .with_for_update()
+    )
+    if request is None or request.status != "pending":
+        raise APIError(
+            "pairing_not_found",
+            "Pending pairing request was not found",
+            status_code=404,
+        )
+    await apply_pairing_decision(
+        session,
+        settings,
+        request,
+        approved=body.approved,
+        actor_user_id=principal.user.id,
+        actor_device_id=principal.device.id,
+    )
+    await session.commit()
+    await session.refresh(request)
+    return PairingRequestSummary(
+        device_id=request.device_public_id,
+        device_name=request.device_name,
+        platform=request.platform,
+        fingerprint=request.fingerprint,
+        status=request.status,
+        created_at=request.created_at,
+        expires_at=request.expires_at,
+    )

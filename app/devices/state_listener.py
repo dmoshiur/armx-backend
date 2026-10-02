@@ -67,6 +67,11 @@ def _normalize_relays(
     return normalized
 
 
+_SENSOR_KINDS = frozenset(
+    {"TEMPERATURE", "HUMIDITY", "MOTION", "CONTACT", "BATTERY", "POWER", "OTHER"}
+)
+
+
 def _normalize_sensors(value: Any, now: datetime) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -86,11 +91,13 @@ def _normalize_sensors(value: Any, now: datetime) -> list[dict[str, Any]]:
             continue
         if not math.isfinite(numeric):
             continue
+        raw_kind = _text(item.get("kind"), 48, default="OTHER").upper()
+        kind = raw_kind if raw_kind in _SENSOR_KINDS else "OTHER"
         sensors.append(
             {
                 "id": sensor_id,
                 "label": _text(item.get("label"), 120, default=sensor_id),
-                "kind": _text(item.get("kind"), 48, default="unknown"),
+                "kind": kind,
                 "value": numeric,
                 "unit": _text(item.get("unit"), 24),
                 "updated_at": now.isoformat(),

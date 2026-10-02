@@ -16,40 +16,42 @@ demo can be claimed. REST errors use `{code, message, retryable, request_id}`.
 
 ## Explicit differences from `docs/api.md`
 
-1. **Device pairing does not use the documented polling exchange.** The Flutter contract
-   describes repeating the same `POST /devices/pair` body while pending and receiving a
-   stable device ID, then a `200` approved response or `403 auth_pairing_rejected`. The backend
-   instead returns a challenge on initial submission, requires every poll to carry a
-   detached Ed25519 signature over canonical JSON, rotates the challenge, and requires a
-   trusted operator to approve or reject out of band with
-   `python -m app.pairing.cli approve|reject <device-id>`. An approved poll returns the
-   device credential once. There is no HTTP owner-approval/rejection route. The Flutter
-   pairing client must be changed or the backend protocol must be reconciled first.
+1. **Device pairing uses an Ed25519 challenge-response polling exchange.** The Flutter
+   contract describes repeating `POST /devices/pair` while pending and receiving a stable
+   device ID, then a `200` approved response or `403 auth_pairing_rejected`. The backend
+   returns a challenge on initial submission, requires polls to carry a detached Ed25519
+   signature over canonical JSON `{challenge, device_id}`, rotates the challenge, and
+   supports approval/rejection via either `python -m app.pairing.cli approve|reject <device-id>`,
+   authenticated admin HTTP routes (`GET /admin/pairing`,
+   `POST /admin/pairing/{device_id}/decision`), or opt-in `PAIRING_AUTO_APPROVE=true` (which
+   still requires the signed challenge poll to prove private-key possession before issuing
+   `device_key`). `RestArmxApi.pair` signs the returned challenge automatically using the
+   stored Ed25519 seed.
 
 2. **Unlock request requires stricter verification than the documented optional assertion.**
-   The backend now verifies the detached signature over the exact canonical JSON object
+   The backend verifies the detached signature over the exact canonical JSON object
    documented by `docs/api.md`: `{device_id, nonce, exp, action}`. It also validates the
    timezone-aware `issued_at`/`exp` fields, algorithm, and that `public_key` matches the
-   authenticated requesting device. However, `assertion` remains mandatory because unlock is
-   HIGH risk under the server-authoritative policy; the Flutter contract calls it optional.
-   The device-key binding and stricter expiry checks are security interpretations that should
-   be recorded in the client contract. Raw biometrics remain forbidden.
+   authenticated requesting device. `assertion` remains mandatory because unlock is HIGH risk
+   under the server-authoritative policy; `UnlockOutcomeResponse` includes `at` alongside
+   `status`, `request_id`, `target_id`, and `message` to match Flutter's
+   `UnlockRequestOutcome.fromJson`. Raw biometrics remain forbidden.
 
 3. **Device commands require an extra verification field and have a different result
    message.** `POST /devices/{id}/command` requires an `owner_verified` signed assertion in
    addition to the documented `command`, `parameters`, and `risk_tier`. The supplied risk
    tier is ignored; the backend derives the required tier from operator-provisioned relay
-   policy. A successful publish response says it was accepted by secure MQTT and that physical
-   state is unconfirmed, rather than claiming `Applied "relay:STATE"`. No physical actuation
-   is reported as successful solely because MQTT accepted a QoS 1 publish.
+   policy. Sensor telemetry kinds are normalized into Flutter's `SensorKind` enum
+   (`TEMPERATURE`, `HUMIDITY`, `MOTION`, `CONTACT`, `BATTERY`, `POWER`, `OTHER`). A
+   successful publish response says it was accepted by secure MQTT and that physical state
+   is unconfirmed, rather than claiming `Applied "relay:STATE"`.
 
 4. **Additional Flutter-interface routes are not all enumerated in `docs/api.md`.** The
-   backend adds `GET /admin/state`, `GET /unlock/paired-targets`, and
-   `POST /unlock/revoke` (body `{ "target_id": "..." }`) based on Flutter interface/models.
-   They are compatibility additions, not documented contract guarantees. The Flutter
-   interface also references `activateScene`, `decideToolCall`, and `adminState`, but the
-   contract does not define every corresponding HTTP/WebSocket request shape. There is no
-   scene-activation route.
+   backend exposes `GET /admin/state`, `GET /unlock/paired-targets`,
+   `POST /unlock/revoke` (body `{ "target_id": "..." }`), and
+   `POST /devices/scenes/{scene_id}/activate` (requires a MEDIUM-tier `owner_verified`
+   assertion and records an audit entry) to back the methods on Flutter's `ArmxApi`
+   interface.
 
 5. **Kill-switch re-enable shape is not documented.** Re-enable is an explicit, authenticated
    `POST /admin/kill` request with `engaged: false`; the backend does not expose a separate
@@ -78,11 +80,12 @@ demo can be claimed. REST errors use `{code, message, retryable, request_id}`.
 
 8. **Intercom upload has an extra assertion and the API document's endpoint count is
    inconsistent.** The backend requires a signed LOW-tier `owner_verified` assertion on
-   `POST /v1/intercom/announcements`; the documented multipart fields do not include it.
-   The table lists seven operations although its introduction says “all six endpoints.”
-   Multipart encoding/field name for the assertion needs agreement. Consent is device-local,
-   revocable, checked again at delivery, and offline/rejected attempts are audited; offline
-   announcements are not queued.
+   `POST /v1/intercom/announcements` (`owner_verified` JSON form field). `GET /v1/intercom/recipients`
+   includes `display_name` and `role` alongside `id`, `device_id`, `name`, `user_id`, and
+   `user_display_name` so `IntercomRecipient.fromJson` populates all fields, and
+   `GET /v1/intercom/announcements` supports optional `target_user_id` filtering.
+   Consent is device-local, revocable, checked again at delivery, and offline/rejected
+   attempts are audited; offline announcements are not queued.
 
 9. **Tool-execution HTTP routes and Email are absent.** The prompt/interface references
    MCP Email and HTTP execute routes, but `docs/api.md` does not define their schemas and the

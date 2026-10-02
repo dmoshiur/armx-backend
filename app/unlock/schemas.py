@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,4 +39,5 @@ class UnlockOutcomeResponse(BaseModel):
     status: Literal["UNLOCKED", "FAILED", "EXPIRED"]
     request_id: str
     target_id: str
+    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     message: str = ""

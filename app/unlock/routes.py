@@ -143,6 +143,7 @@ async def request_unlock(
             status="EXPIRED",
             request_id=f"unlock-{token_hex(4)}",
             target_id=target.id,
+            at=now,
             message="Token expired before it reached the target.",
         )
 
@@ -209,6 +210,7 @@ async def request_unlock(
         status="FAILED",
         request_id=request_id,
         target_id=target.id,
+        at=now,
         message="Unlock agent transport is not connected.",
     )
 

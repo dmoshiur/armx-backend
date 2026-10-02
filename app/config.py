@@ -111,6 +111,10 @@ class Settings(BaseSettings):
     notes_enabled: bool = True
     mqtt_tool_enabled: bool = False
     intercom_enabled: bool = True
+    # Optional convenience setting for demos where an operator cannot run the CLI on the
+    # host to approve the initial device; the client must STILL prove possession of the
+    # Ed25519 private key via the signed pairing challenge before receiving device_key.
+    pairing_auto_approve: bool = False
 
     @property
     def jwt_secret_was_generated(self) -> bool:

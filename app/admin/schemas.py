@@ -50,3 +50,17 @@ class KillSwitchResponse(BaseModel):
     reason: str = ""
     actor: str = ""
     sockets_closed: int = 0
+
+
+class PairingDecisionRequest(RequestModel):
+    approved: bool
+
+
+class PairingRequestSummary(BaseModel):
+    device_id: str
+    device_name: str
+    platform: str
+    fingerprint: str
+    status: str
+    created_at: datetime
+    expires_at: datetime

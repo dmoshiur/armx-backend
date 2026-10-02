@@ -70,6 +70,10 @@ class UnpairRequest(RequestModel):
     device_id: str = Field(min_length=1, max_length=96)
 
 
+class SceneActivateRequest(RequestModel):
+    owner_verified: OwnerAssertionInput | None = None
+
+
 class DeviceCommandResponse(BaseModel):
     device_id: str
     accepted: bool
