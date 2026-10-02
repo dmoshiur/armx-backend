@@ -16,6 +16,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.admin.routes import router as admin_router
+from app.audit.routes import router as audit_router
 from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.core.errors import APIError
@@ -168,6 +170,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(auth_router)
     application.include_router(pairing_router)
     application.include_router(devices_router)
+    application.include_router(admin_router)
+    application.include_router(audit_router)
     application.include_router(websocket_router)
     return application
 
