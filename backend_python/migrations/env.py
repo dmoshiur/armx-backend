@@ -6,11 +6,12 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.config import get_settings
 from app.db import models  # noqa: F401 - registers model metadata for Alembic.
 from app.db.base import Base
+from app.db.engine import create_database_engine
+from app.db.urls import DatabaseBackend, database_backend
 
 config = context.config
 settings = get_settings()
@@ -20,6 +21,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+_is_sqlite_family = database_backend(settings.database_url) in {
+    DatabaseBackend.AIOSQLITE,
+    DatabaseBackend.LIBSQL,
+}
 
 
 def run_migrations_offline() -> None:
@@ -29,25 +34,38 @@ def run_migrations_offline() -> None:
         url=settings.database_url,
         target_metadata=target_metadata,
         literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        # SQLite/libSQL do not support most ALTER TABLE forms; batch mode rewrites tables.
+        render_as_batch=_is_sqlite_family,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        render_as_batch=_is_sqlite_family,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
 
 async def run_migrations_online() -> None:
-    """Run migrations through an asynchronous SQLAlchemy engine."""
+    """Run migrations through the application's asynchronous engine factory."""
 
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}) or {},
-        prefix="sqlalchemy.",
+    connectable = create_database_engine(
+        settings.database_url,
+        echo=settings.database_echo,
+        pool_pre_ping=settings.database_pool_pre_ping,
+        auth_token=(
+            settings.turso_auth_token.get_secret_value()
+            if settings.turso_auth_token is not None
+            else None
+        ),
+        timeout_seconds=settings.database_timeout_seconds,
         poolclass=pool.NullPool,
     )
     try:

@@ -173,7 +173,12 @@ async def _apply_message(topic: str, payload: bytes) -> None:
 
 
 async def mqtt_state_listener(settings: Settings, stop: asyncio.Event) -> None:
-    """Consume authenticated TLS MQTT telemetry and route only to the owning user."""
+    """Consume authenticated TLS MQTT telemetry from the external broker.
+
+    The backend dials out to the broker; ESP32 devices connect to the same broker directly
+    over MQTT/TLS.  Only state for provisioned devices (``armx/{site}/{device}/state``) is
+    accepted, and every event is routed only to the owning user's authenticated sockets.
+    """
 
     if not settings.mqtt_enabled:
         return
@@ -183,6 +188,7 @@ async def mqtt_state_listener(settings: Settings, stop: asyncio.Event) -> None:
                 hostname=settings.mqtt_host,
                 port=settings.mqtt_port,
                 identifier=f"{settings.mqtt_client_id}-state",
+                keepalive=settings.mqtt_keepalive_seconds,
                 username=settings.mqtt_username,
                 password=settings.mqtt_password.get_secret_value()
                 if settings.mqtt_password

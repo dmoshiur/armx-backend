@@ -170,6 +170,8 @@ async def test_unlock_target_listing_and_revocation_are_owner_scoped() -> None:
             roles=["user"],
         )
         session.add(other)
+        # Foreign keys are enforced, so the new owner is flushed before its targets.
+        await session.flush()
         session.add_all(
             [
                 _target(target_id="fresh", owner_id=owner.id, now=now),

@@ -14,10 +14,13 @@ dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
   "pydantic-settings>=2.6,<3",
-  "sqlalchemy[asyncio]>=2.0.36,<3",
+  # The asyncio DBAPI adapters in sqlalchemy.connectors.asyncio (2.1+) back the
+  # sqlite+libsql dialect in app/db/libsql_async.py.
+  "sqlalchemy[asyncio]>=2.1,<3",
   "alembic>=1.14,<2",
   "aiosqlite>=0.20,<1",
-  "asyncpg>=0.30,<1",
+  # Official Turso/libSQL client. It is synchronous; app/db/libsql_async.py wraps it.
+  "libsql>=0.1.11,<1",
   "PyJWT[crypto]>=2.10,<3",
   "argon2-cffi>=23.1,<26",
   "cryptography>=44,<48",

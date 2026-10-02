@@ -1,0 +1,98 @@
+# Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
+#
+# Render Blueprint for the A.R.M.X AI backend.
+#
+# One free Web Service (native Python runtime, no Docker on Render). All persistence lives
+# in a remote Turso/libSQL database, so nothing depends on Render's ephemeral filesystem.
+# Device transport is an external MQTT broker that both the ESP32 firmware and this backend
+# dial out to; Render never exposes a broker port. Secrets are declared with ``sync: false``
+# so Render prompts for them in the dashboard and no value is ever committed here.
+#
+# See docs/deploy-render.md for the full walkthrough (Turso database, broker credentials,
+# first deploy, free-vs-paid plan, and WebSocket verification).
+
+previews:
+  # Never point preview environments at the production Turso database.
+  generation: off
+
+services:
+  - type: web
+    name: armx-backend
+    runtime: python
+    # Free is fine for a supervised demo only; upgrade to the smallest paid instance
+    # (``0.5c-512mb``, Render's ~$7/mo Starter tier) for the always-on science-fair run.
+    # See docs/deploy-render.md for the warm-up options if you stay free.
+    plan: free
+    # Keep this in the same region as the Turso database (``sin`` = Singapore) to avoid a
+    # round-the-world hop on every statement.
+    region: singapore
+    rootDir: backend_python
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    buildCommand: python -m pip install --upgrade pip && python -m pip install .
+    # Free instances do not support preDeployCommand, so migrations run at start (idempotent).
+    # On a paid plan with more than one instance, move ``alembic upgrade head`` to
+    # preDeployCommand so exactly one instance migrates per deploy.
+    # --proxy-headers + --forwarded-allow-ips let uvicorn trust Render's TLS-terminating
+    # proxy, so the app sees https/wss for external clients. The WebSocket ping interval
+    # (20 s) stays well below Render's idle window; the app-level heartbeat adds 25 s.
+    startCommand: >-
+      alembic upgrade head &&
+      uvicorn app.main:app --host 0.0.0.0 --port $PORT
+      --proxy-headers --forwarded-allow-ips='*'
+      --ws-ping-interval 20 --ws-ping-timeout 20
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DEMO_INSECURE
+        value: "false"
+      # Public HTTPS origin of this service (e.g. https://armx-backend.onrender.com).
+      - key: PUBLIC_API_BASE_URL
+        sync: false
+      # Paste the Turso/libSQL URL (libsql://<db>-<org>.turso.io). TLS is applied
+      # automatically; the auth token belongs in TURSO_AUTH_TOKEN, never in this URL.
+      - key: DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: DATABASE_TIMEOUT_SECONDS
+        value: "30"
+      - key: DATABASE_POOL_PRE_PING
+        value: "true"
+      # At least 32 characters. Generate with:
+      #   python -c 'import secrets; print(secrets.token_urlsafe(48))'
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: BOOTSTRAP_ADMIN_USERNAME
+        value: mohiur
+      # At least 12 characters; required the first time the service starts.
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        value: owner@thamjj13.top
+      - key: BOOTSTRAP_ADMIN_DISPLAY_NAME
+        value: Md. Moshiur Rahman Mohi
+      # Browser origins for Flutter web/desktop builds only; blank blocks all browser origins.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      # Render's internal liveness probe is plain HTTP (its edge still redirects public HTTP
+      # to HTTPS). This allows only a parameterless GET /health over that hop; every other
+      # request keeps requiring TLS. See app/main.py and docs/deploy-render.md.
+      - key: ALLOW_PLAIN_HTTP_HEALTH_PROBE
+        value: "true"
+      # External MQTT broker (e.g. HiveMQ Cloud Serverless). ESP32 devices connect to the
+      # same broker over MQTT/TLS 8883; this backend only connects *out* to it.
+      - key: MQTT_ENABLED
+        value: "true"
+      - key: MQTT_HOST
+        sync: false
+      - key: MQTT_PORT
+        value: "8883"
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: MQTT_KEEPALIVE_SECONDS
+        value: "30"

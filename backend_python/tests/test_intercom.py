@@ -74,16 +74,17 @@ async def _add_recipient(harness: Harness, *, consented: bool) -> tuple[str, str
         last_seen_at=datetime.now(UTC) - timedelta(minutes=5),
     )
     async with harness.factory() as session:
-        session.add_all(
-            [
-                user,
-                device,
-                IntercomConsent(
-                    device_id=device.id,
-                    enabled=consented,
-                    allow_while_locked=False,
-                ),
-            ]
+        # Foreign keys are enforced, so parent rows are flushed before their dependents.
+        session.add(user)
+        await session.flush()
+        session.add(device)
+        await session.flush()
+        session.add(
+            IntercomConsent(
+                device_id=device.id,
+                enabled=consented,
+                allow_while_locked=False,
+            )
         )
         await session.commit()
     return device_key, device.public_id
