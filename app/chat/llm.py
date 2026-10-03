@@ -2,9 +2,9 @@
 
 """LLM router: selects the configured provider adapter and normalizes its output.
 
-``LLM_PROVIDER=ashna`` (default) routes to Ashna AI's hosted ``ashna-x1`` model via
-:mod:`app.chat.providers.ashna_adapter`; ``ollama`` and ``openai_compatible`` remain
-available for local development and offline fallback. Every provider returns the same
+LLM_PROVIDER=groq (default) routes to Groq's Qwen model through the OpenAI-compatible Chat
+Completions API. Ashna, Ollama and generic OpenAI-compatible providers remain selectable;
+Ollama is intended for local development and offline fallback. Every provider returns the same
 normalized :class:`LLMResult` shape, so the chat pipeline and WS events are unaffected
 by provider selection.
 """

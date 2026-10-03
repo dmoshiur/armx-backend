@@ -101,8 +101,7 @@ services:
         value: groq
       - key: GROQ_API_KEY
         sync: false
-      # Optional overrides (the defaults are the production Groq endpoint/model).
-      # - key: GROQ_BASE_URL
-      #   value: https://api.groq.com/openai/v1
-      # - key: GROQ_MODEL
-      #   value: qwen/qwen3.8-27b
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b

@@ -24,8 +24,8 @@ services:
       MQTT_TLS_CA_FILE: /run/armx/mqtt-ca/server.crt
       INTERCOM_ENABLED: ${INTERCOM_ENABLED:-true}
       # Compose keeps the offline local Ollama path so the stack runs without external
-      # credentials. For the hosted default provider instead, set LLM_PROVIDER=ashna and
-      # ASHNA_API_KEY (see the "LLM provider (Ashna AI)" section of README.md).
+      # credentials. For the hosted default provider instead, set LLM_PROVIDER=groq and
+      # GROQ_API_KEY (see the "LLM provider (Groq)" section of README.md).
       LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}

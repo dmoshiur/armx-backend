@@ -68,6 +68,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        llm_models = {
+            "groq": configured.groq_model,
+            "ashna": configured.ashna_model,
+            "ollama": configured.ollama_model,
+            "openai_compatible": configured.openai_compatible_model or "(unset)",
+        }
+        logger.info(
+            "Chat provider active: provider=%s model=%s",
+            configured.llm_provider,
+            llm_models[configured.llm_provider],
+        )
         if configured.demo_insecure:
             logger.warning(
                 "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."

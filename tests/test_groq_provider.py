@@ -25,6 +25,21 @@ def _settings(**overrides: Any) -> Settings:
     return Settings(**values)
 
 
+def test_groq_is_default_provider_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    settings = Settings(
+        _env_file=None,
+        environment="demo",
+        demo_insecure=True,
+        database_url="sqlite+aiosqlite:///./groq-default-test.db",
+        jwt_secret_key="g" * 32,
+        groq_api_key=SecretStr("groq-test-secret"),
+    )
+    assert settings.llm_provider == "groq"
+    assert settings.groq_model == "qwen/qwen3.8-27b"
+
+
 def test_groq_requires_key_and_https_endpoint() -> None:
     with pytest.raises(ValidationError, match="GROQ_API_KEY is required"):
         _settings(groq_api_key=None)

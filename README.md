@@ -235,7 +235,7 @@ voice plus system biometric/PIN evidence. Voice alone never satisfies even LOW.
 
 ## Science Fair Demo Runbook
 
-Two paths are supported. **Hosted (primary):** Render + Turso + Ashna `ashna-x1` + the
+Two paths are supported. **Hosted (primary):** Render + Turso + Groq Qwen 3.8 27B + the
 external MQTT broker — best if the venue has reliable internet. **Local fallback:** the
 Docker Compose stack with local Mosquitto and Ollama — use it if the internet or Render is
 unavailable on the day. Both use only synthetic/demo evidence; never real biometric data.
@@ -342,7 +342,7 @@ per-person consent semantics. Rules are stored and dry-run only; they do not dis
 ## Deployed profile checklist
 
 The Compose file is a local/demo setup, not a production deployment template. The supported
-production shape is Render + Turso + an external MQTT broker + Ashna `ashna-x1`
+production shape is Render + Turso + an external MQTT broker + Groq Qwen 3.8 27B
 ([`docs/deploy-render.md`](docs/deploy-render.md)). Outside the explicit local/demo profile:
 
 - `ENVIRONMENT=staging`/`production`, `DEMO_INSECURE=false`, HTTPS/WSS through a trusted TLS
