@@ -71,15 +71,6 @@ services:
       #   python -c 'import secrets; print(secrets.token_urlsafe(48))'
       - key: JWT_SECRET_KEY
         sync: false
-      - key: BOOTSTRAP_ADMIN_USERNAME
-        value: mohiur
-      # At least 12 characters; required the first time the service starts.
-      - key: BOOTSTRAP_ADMIN_PASSWORD
-        sync: false
-      - key: BOOTSTRAP_ADMIN_EMAIL
-        value: owner@thamjj13.top
-      - key: BOOTSTRAP_ADMIN_DISPLAY_NAME
-        value: Md. Moshiur Rahman Mohi
       # Browser origins for Flutter web/desktop builds only; blank blocks all browser origins.
       - key: CORS_ALLOWED_ORIGINS
         sync: false

@@ -89,7 +89,7 @@ For a purely local trial without a Turso account, the same dialect runs against 
 | `DATABASE_URL` | `libsql://armx-backend-<org>.turso.io` from §3 |
 | `TURSO_AUTH_TOKEN` | token from §3 |
 | `JWT_SECRET_KEY` | random, **at least 32 chars**: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-| `BOOTSTRAP_ADMIN_PASSWORD` | **at least 12 chars**; creates the owner on first boot |
+| First account | The first registration on a fresh database becomes administrator; later accounts are regular users |
 | `CORS_ALLOWED_ORIGINS` | Flutter web origin(s), comma-separated; blank blocks all browser origins (native apps are unaffected) |
 | `MQTT_HOST` | broker host, e.g. `abc123.s1.eu.hivemq.cloud` |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | broker credentials (HiveMQ **Access Management**) |
@@ -137,7 +137,7 @@ so a single instance migrates per deploy.
 
 ```bash
 curl --fail https://<service-name>.onrender.com/health
-# {"server_version":"0.1.0","requires_pairing":true,"at":"..."}
+# {"server_version":"0.1.0","requires_pairing":false,"at":"..."}
 ```
 
 *Verified against Render's health-check docs*: Render sends `GET /health` every few seconds;
@@ -335,7 +335,6 @@ Record the date, service URL, and observed results here before demo day:
 | Start fails with `ASHNA_API_KEY is required when LLM_PROVIDER=ashna` | Blueprint prompt left empty, or a non-Ashna provider was intended; set the key or switch `LLM_PROVIDER` |
 | Start fails with `TURSO_AUTH_TOKEN is required` | Remote `DATABASE_URL` without the token, or a local SQLite URL in the `production` profile |
 | Start fails with `JWT_SECRET_KEY must contain at least 32 characters` | Short/missing signing secret |
-| Start fails with `BOOTSTRAP_ADMIN_PASSWORD` error | Password shorter than 12 characters |
 | 503 `service_unavailable` from `/health` | Turso unreachable (URL/token/region) or the instance is stuck on a hanging driver call |
 | WebSocket closes immediately (1008) | Client used `ws://` instead of `wss://`; production only accepts secure sockets |
 | WebSocket drops after idle | Free-tier spin-down: reconnect logic + client traffic, a `/health` pinger, or a paid plan |

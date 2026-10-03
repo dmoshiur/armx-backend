@@ -20,7 +20,10 @@ class UserProfileResponse(BaseModel):
 class LoginRequest(RequestModel):
     username: str = Field(min_length=1, max_length=64)
     password: SecretStr = Field(min_length=1, max_length=256)
-    device_key: SecretStr = Field(min_length=16, max_length=256)
+    # Device credentials are no longer a prerequisite for account login.
+    device_key: SecretStr | None = Field(default=None, min_length=16, max_length=256)
+    public_key: str = Field(min_length=40, max_length=256)
+    device_name: str = Field(min_length=1, max_length=120)
     platform: str = Field(min_length=1, max_length=32)
     client_version: str = Field(min_length=1, max_length=48)
 
@@ -51,6 +54,7 @@ class LoginResponse(BaseModel):
     refresh_token: str
     expires_at: datetime
     device_id: str
+    device_key: str
     user: UserProfileResponse
 
 

@@ -17,7 +17,7 @@ from app.config import Settings, get_settings
 from app.core.security import hash_device_key, hash_password
 from app.db.base import Base
 from app.db.engine import create_database_engine
-from app.db.models import Device, User
+from app.db.models import Device, SystemState, User
 from app.db.session import get_session
 from app.db.urls import DatabaseBackend, database_backend, normalize_database_url
 from app.main import create_app
@@ -51,6 +51,7 @@ class Harness:
     settings: Settings
     device_key: str
     private_key: Ed25519PrivateKey
+    public_key: str
 
 
 async def _harness() -> Harness:
@@ -114,7 +115,38 @@ async def _harness() -> Harness:
 
     application.dependency_overrides[get_session] = override_session
     application.dependency_overrides[get_settings] = lambda: settings
-    return Harness(engine, factory, application, settings, device_key, private_key)
+    return Harness(engine, factory, application, settings, device_key, private_key, public_key)
+
+
+async def _empty_harness() -> Harness:
+    """Create a fresh database for first-account/admin-election smoke tests."""
+    settings = Settings(
+        _env_file=None,
+        environment="demo",
+        demo_insecure=True,
+        jwt_secret_key="test-signing-key-that-is-long-enough-012345",
+        llm_provider="ollama",
+    )
+    engine = create_database_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add(SystemState(id=1, assistant_enabled=True, kill_switch_engaged=False))
+        await session.commit()
+    private_key = Ed25519PrivateKey.generate()
+    public_key = base64.b64encode(
+        private_key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    ).decode("ascii")
+    application = create_app(settings)
+
+    async def override_session():
+        async with factory() as session:
+            yield session
+
+    application.dependency_overrides[get_session] = override_session
+    application.dependency_overrides[get_settings] = lambda: settings
+    return Harness(engine, factory, application, settings, "", private_key, public_key)
 
 
 async def _login(client: AsyncClient, harness: Harness, *, header_key: str | None = None):
@@ -125,6 +157,12 @@ async def _login(client: AsyncClient, harness: Harness, *, header_key: str | Non
             "username": "owner",
             "password": "Correct horse battery staple!",
             "device_key": harness.device_key,
+            "public_key": base64.b64encode(
+                harness.private_key.public_key().public_bytes(
+                    Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+                )
+            ).decode("ascii"),
+            "device_name": "Test phone",
             "platform": "android",
             "client_version": "0.1.0+1",
         },

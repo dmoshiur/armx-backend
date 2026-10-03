@@ -54,7 +54,7 @@ class User(Base):
 class Device(Base):
     __tablename__ = "devices"
     __table_args__ = (
-        UniqueConstraint("public_key", name="uq_devices_public_key"),
+        UniqueConstraint("owner_id", "public_key", name="uq_devices_owner_public_key"),
         Index("ix_devices_owner_id", "owner_id"),
     )
 

@@ -7,21 +7,21 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.service import write_audit
 from app.auth.dependencies import Principal, public_device_id, public_user_id, require_principal
 from app.auth.schemas import (
     LoginRequest,
     LoginResponse,
-    RegisterRequest,
-    RegisterResponse,
     RefreshRequest,
     RefreshResponse,
+    RegisterRequest,
+    RegisterResponse,
     UserProfileResponse,
 )
 from app.config import Settings, get_settings
@@ -69,9 +69,13 @@ async def register(
     if not display_name:
         raise APIError("invalid_request", "Display name is required", status_code=422)
     if await session.scalar(select(User.id).where(User.username == username)) is not None:
-        raise APIError("auth_registration_conflict", "Account details are already in use", status_code=409)
+        raise APIError(
+            "auth_registration_conflict", "Account details are already in use", status_code=409
+        )
     if await session.scalar(select(User.id).where(User.email == email)) is not None:
-        raise APIError("auth_registration_conflict", "Account details are already in use", status_code=409)
+        raise APIError(
+            "auth_registration_conflict", "Account details are already in use", status_code=409
+        )
 
     now = datetime.now(UTC)
     user = User(
@@ -178,23 +182,9 @@ async def register(
 async def login(
     body: LoginRequest,
     response: Response,
-    x_armx_device_key: str | None = Header(default=None, alias="X-Armx-Device-Key"),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> LoginResponse:
-    raw_device_key = body.device_key.get_secret_value()
-    if x_armx_device_key is not None and not hmac.compare_digest(x_armx_device_key, raw_device_key):
-        raise APIError("auth_pairing_rejected", "Device pairing was rejected", status_code=403)
-
-    device_hash = hash_device_key(raw_device_key)
-    device = await session.scalar(select(Device).where(Device.device_key_hash == device_hash))
-    if device is None:
-        raise APIError("auth_pairing_rejected", "Device pairing was rejected", status_code=403)
-    if not device.is_active or device.revoked_at is not None:
-        raise APIError(
-            "auth_device_revoked", "This device is no longer authorized", status_code=403
-        )
-
     username = body.username.strip().lower()
     user = await session.scalar(select(User).where(User.username == username))
     if user is None:
@@ -204,9 +194,7 @@ async def login(
     if not user.is_active or (user.locked_until and _as_utc(user.locked_until) > now):
         raise APIError("auth_account_locked", "This account is locked", status_code=403)
 
-    if device.owner_id != user.id or not verify_password(
-        user.password_hash, body.password.get_secret_value()
-    ):
+    if not verify_password(user.password_hash, body.password.get_secret_value()):
         user.failed_login_count += 1
         if user.failed_login_count >= settings.auth_max_failures:
             user.locked_until = now + timedelta(seconds=settings.auth_lockout_seconds)
@@ -215,6 +203,72 @@ async def login(
 
     user.failed_login_count = 0
     user.locked_until = None
+    try:
+        decode_ed25519_spki(body.public_key)
+    except (ValueError, TypeError):
+        raise APIError("invalid_device_key", "Invalid device public key", status_code=422) from None
+
+    # Enroll the install after verifying the account password. Device identities are
+    # scoped per account so shared computers can be used by multiple account holders.
+    device = await session.scalar(
+        select(Device).where(Device.owner_id == user.id, Device.public_key == body.public_key)
+    )
+    candidate_device_key = (
+        body.device_key.get_secret_value() if body.device_key is not None else ""
+    )
+    # Preserve a valid credential to avoid rotating it on each sign-in. A stale or
+    # missing device credential never blocks password login; it is simply replaced.
+    preserve_device_key = (
+        device is not None
+        and bool(candidate_device_key)
+        and hmac.compare_digest(
+            hash_device_key(candidate_device_key), device.device_key_hash
+        )
+    )
+    raw_device_key = (
+        candidate_device_key
+        if preserve_device_key
+        else f"arx.device.{token_urlsafe(36)}"
+    )
+    now = datetime.now(UTC)
+    if device is None:
+        device = Device(
+            public_id=f"device-{uuid.uuid4().hex[:8]}",
+            owner_id=user.id,
+            name=body.device_name.strip(),
+            platform=body.platform.strip().lower(),
+            public_key=body.public_key,
+            device_key_hash=hash_device_key(raw_device_key),
+            site="home",
+            kind="OTHER",
+            state_json={
+                "id": "",
+                "name": body.device_name.strip(),
+                "site": "home",
+                "kind": "OTHER",
+                "online": True,
+                "risk_tier": "MEDIUM",
+                "firmware": body.client_version,
+                "last_seen_at": now.isoformat(),
+                "relays": [],
+                "sensors": [],
+                "tags": {},
+            },
+            last_seen_at=now,
+            paired_at=now,
+        )
+        session.add(device)
+        await session.flush()
+        device.state_json["id"] = device.public_id
+    else:
+        if not device.is_active or device.revoked_at is not None:
+            raise APIError(
+                "auth_device_revoked", "This device is no longer authorized", status_code=403
+            )
+        device.name = body.device_name.strip()
+        device.platform = body.platform.strip().lower()
+        if not preserve_device_key:
+            device.device_key_hash = hash_device_key(raw_device_key)
     device.last_seen_at = now
     refresh_token, refresh_hash = issue_refresh_token()
     session_expiry = now + timedelta(seconds=settings.refresh_token_ttl_seconds)
@@ -249,6 +303,7 @@ async def login(
         refresh_token=refresh_token,
         expires_at=access_expiry,
         device_id=public_device_id(device),
+        device_key=raw_device_key,
         user=UserProfileResponse(
             id=public_user_id(user),
             display_name=user.display_name,

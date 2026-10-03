@@ -191,9 +191,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
-        del exc
         request_id = _request_id(request)
-        logger.error("Unhandled API error request_id=%s", request_id)
+        # Keep production logs useful for correlating failures without logging the
+        # exception text, which may contain SQL values or other user supplied data.
+        logger.error(
+            "Unhandled API error request_id=%s exception_type=%s",
+            request_id,
+            type(exc).__name__,
+        )
         return JSONResponse(
             status_code=500,
             content=_error_body(request, "internal_error", "An internal error occurred", True),
@@ -210,7 +215,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ) from None
         return HealthResponse(
             server_version=_SERVER_VERSION,
-            requires_pairing=True,
+            requires_pairing=False,
             at=datetime.now(UTC),
         )
 

@@ -164,7 +164,8 @@ async def test_intercom_missed_delivery_is_not_queued_and_both_sides_see_same_ro
             json={
                 "username": "recipient",
                 "password": "Recipient passphrase 2026!",
-                "device_key": recipient_key,
+                "public_key": _public_key(Ed25519PrivateKey.generate()),
+                "device_name": "New recipient phone",
                 "platform": "android",
                 "client_version": "0.1.0+1",
             },
@@ -172,7 +173,7 @@ async def test_intercom_missed_delivery_is_not_queued_and_both_sides_see_same_ro
         assert recipient_login.status_code == 200
         recipient_headers = {
             "Authorization": f"Bearer {recipient_login.json()['access_token']}",
-            "X-Armx-Device-Key": recipient_key,
+            "X-Armx-Device-Key": recipient_login.json()["device_key"],
         }
         sender_log = await client.get("/v1/intercom/announcements", headers=sender_headers)
         recipient_log = await client.get("/v1/intercom/announcements", headers=recipient_headers)

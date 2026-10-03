@@ -4,8 +4,7 @@ import logging
 
 from sqlalchemy import select
 
-from app.config import Settings, get_settings
-from app.core.security import hash_password
+from app.config import Settings
 from app.db.models import SystemState, ToolToggle, User
 from app.db.session import SessionFactory
 
@@ -14,9 +13,8 @@ _DEFAULT_TOOLS = ("GITHUB", "MAIL", "MQTT", "DB", "SYSTEM", "VISION")
 
 
 async def initialize_database_state(settings: Settings | None = None) -> None:
-    """Create singleton system state, safe tool defaults, and optional bootstrap owner."""
+    """Create system defaults while leaving a fresh account database empty."""
 
-    config = settings or get_settings()
     async with SessionFactory() as session:
         if await session.get(SystemState, 1) is None:
             session.add(SystemState(id=1, assistant_enabled=True, kill_switch_engaged=False))
@@ -24,32 +22,17 @@ async def initialize_database_state(settings: Settings | None = None) -> None:
             if await session.get(ToolToggle, name) is None:
                 session.add(ToolToggle(name=name, enabled=False))
 
-        if config.bootstrap_admin_password is not None:
-            user = await session.scalar(
-                select(User).where(User.username == config.bootstrap_admin_username.strip().lower())
+        # A fresh database stays empty so its first successful registration can claim
+        # administrator status atomically. Existing owners are backfilled below, and
+        # credentials from legacy BOOTSTRAP_ADMIN_* variables are intentionally ignored.
+        existing_owner = await session.scalar(
+            select(User.id).where(User.roles.contains(["owner"]))
+        )
+        if existing_owner is None:
+            logger.warning(
+                "No administrator exists; the first registered account will receive "
+                "the initial administrator role."
             )
-            if user is None:
-                session.add(
-                    User(
-                        public_id=f"user-{config.bootstrap_admin_username.strip().lower()}",
-                        username=config.bootstrap_admin_username.strip().lower(),
-                        email=config.bootstrap_admin_email.strip().lower(),
-                        display_name=config.bootstrap_admin_display_name,
-                        password_hash=hash_password(
-                            config.bootstrap_admin_password.get_secret_value()
-                        ),
-                        roles=["owner", "admin"],
-                    )
-                )
-        else:
-            existing_owner = await session.scalar(
-                select(User.id).where(User.roles.contains(["owner"]))
-            )
-            if existing_owner is None:
-                logger.warning(
-                    "No bootstrap administrator is configured; the first registered account "
-                    "will receive the initial administrator role."
-                )
         await session.flush()
         system_state = await session.get(SystemState, 1)
         if system_state is not None and system_state.first_admin_user_id is None:

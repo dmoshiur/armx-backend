@@ -65,10 +65,6 @@ class Settings(BaseSettings):
     allow_plain_http_health_probe: bool = False
 
     jwt_secret_key: SecretStr = Field(default=SecretStr(""), repr=False)
-    bootstrap_admin_username: str = "mohiur"
-    bootstrap_admin_password: SecretStr | None = Field(default=None, repr=False)
-    bootstrap_admin_email: str = "owner@thamjj13.top"
-    bootstrap_admin_display_name: str = "Md. Moshiur Rahman Mohi"
     access_token_ttl_seconds: int = Field(default=1_800, ge=60, le=86_400)
     refresh_token_ttl_seconds: int = Field(default=2_592_000, ge=60, le=31_536_000)
     owner_assertion_ttl_seconds: int = Field(default=60, ge=1, le=60)
@@ -233,13 +229,6 @@ class Settings(BaseSettings):
             )
         ):
             raise ValueError("MQTT_USERNAME and MQTT_PASSWORD are required for deployed profiles")
-        if self.bootstrap_admin_password is not None:
-            if len(self.bootstrap_admin_password.get_secret_value()) < 12:
-                raise ValueError("BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters")
-            if not self.bootstrap_admin_username.strip() or len(self.bootstrap_admin_username) > 64:
-                raise ValueError("BOOTSTRAP_ADMIN_USERNAME must be 1–64 characters")
-            if len(self.bootstrap_admin_email) > 254:
-                raise ValueError("BOOTSTRAP_ADMIN_EMAIL must be at most 254 characters")
         if self.public_api_base_url:
             parsed_base = urlsplit(self.public_api_base_url)
             secure_profile = not (self.demo_insecure and self.environment in {"local", "demo"})

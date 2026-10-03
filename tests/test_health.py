@@ -72,7 +72,7 @@ async def test_health_returns_documented_contract() -> None:
 
     assert response.status_code == 200
     assert response.json()["server_version"] == "0.1.0"
-    assert response.json()["requires_pairing"] is True
+    assert response.json()["requires_pairing"] is False
     assert response.json()["at"].endswith("Z")
 
 

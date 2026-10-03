@@ -26,7 +26,6 @@ DASHBOARD_PROVIDED_KEYS = {
     "DATABASE_URL",
     "TURSO_AUTH_TOKEN",
     "JWT_SECRET_KEY",
-    "BOOTSTRAP_ADMIN_PASSWORD",
     "CORS_ALLOWED_ORIGINS",
     "MQTT_HOST",
     "MQTT_USERNAME",
@@ -78,6 +77,7 @@ def test_blueprint_prompts_for_every_dashboard_value_and_commits_no_secrets() ->
         assert key in env_vars, f"{key} must be declared in render.yaml"
         assert env_vars[key].get("sync") is False, f"{key} must be declared with sync: false"
         assert "value" not in env_vars[key], f"{key} must not have a committed value"
+    assert not any(key.startswith("BOOTSTRAP_ADMIN_") for key in env_vars)
     assert env_vars["LLM_PROVIDER"]["value"] == "ashna"
     assert env_vars["MQTT_PORT"]["value"] == "8883"
     assert env_vars["DEMO_INSECURE"]["value"] == "false"
