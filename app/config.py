@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     mqtt_client_id: str = "armx-backend"
     mqtt_keepalive_seconds: int = Field(default=30, ge=5, le=600)
 
-    llm_provider: Literal["ashna", "ollama", "openai_compatible"] = "ashna"
+    llm_provider: Literal["ashna", "ollama", "openai_compatible", "groq"] = "groq"
     # Ashna AI hosted model (OpenAI-compatible API; docs: https://www.ashna.ai/api-docs).
     # The key comes only from ASHNA_API_KEY and is never logged (AGENTS.md rule 9).
     ashna_api_key: SecretStr | None = Field(default=None, repr=False)
@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     openai_compatible_base_url: str | None = None
     openai_compatible_api_key: SecretStr | None = Field(default=None, repr=False)
     openai_compatible_model: str | None = None
+    groq_api_key: SecretStr | None = Field(default=None, repr=False)
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "qwen/qwen3.8-27b"
     llm_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
 
     github_token: SecretStr | None = Field(default=None, repr=False)
@@ -211,6 +214,13 @@ class Settings(BaseSettings):
                 raise ValueError("ASHNA_MODEL must not be empty when LLM_PROVIDER=ashna")
             if not _safe_http_endpoint(self.ashna_base_url, require_tls=not explicit_demo):
                 raise ValueError("ASHNA_BASE_URL must be a safe HTTPS endpoint outside demo mode")
+        if self.llm_provider == "groq":
+            if self.groq_api_key is None or not self.groq_api_key.get_secret_value().strip():
+                raise ValueError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
+            if not self.groq_model.strip():
+                raise ValueError("GROQ_MODEL must not be empty when LLM_PROVIDER=groq")
+            if not _safe_http_endpoint(self.groq_base_url, require_tls=True):
+                raise ValueError("GROQ_BASE_URL must be a safe HTTPS endpoint")
         if self.llm_provider == "ollama" and not _safe_http_endpoint(
             self.ollama_base_url, require_tls=not explicit_demo
         ):

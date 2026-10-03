@@ -30,7 +30,7 @@ DASHBOARD_PROVIDED_KEYS = {
     "MQTT_HOST",
     "MQTT_USERNAME",
     "MQTT_PASSWORD",
-    "ASHNA_API_KEY",
+    "GROQ_API_KEY",
 }
 
 
@@ -78,7 +78,7 @@ def test_blueprint_prompts_for_every_dashboard_value_and_commits_no_secrets() ->
         assert env_vars[key].get("sync") is False, f"{key} must be declared with sync: false"
         assert "value" not in env_vars[key], f"{key} must not have a committed value"
     assert not any(key.startswith("BOOTSTRAP_ADMIN_") for key in env_vars)
-    assert env_vars["LLM_PROVIDER"]["value"] == "ashna"
+    assert env_vars["LLM_PROVIDER"]["value"] == "groq"
     assert env_vars["MQTT_PORT"]["value"] == "8883"
     assert env_vars["DEMO_INSECURE"]["value"] == "false"
     assert env_vars["ENVIRONMENT"]["value"] == "production"

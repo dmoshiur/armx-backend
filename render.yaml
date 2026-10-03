@@ -96,17 +96,13 @@ services:
         sync: false
       - key: MQTT_KEEPALIVE_SECONDS
         value: "30"
-      # Chat LLM provider. Default is Ashna AI's hosted ashna-x1 model via its
-      # OpenAI-compatible API (https://www.ashna.ai/api-docs). Startup fails clearly if
-      # ASHNA_API_KEY is missing; set LLM_PROVIDER=ollama for a local-model fallback.
+      # Chat LLM provider: Groq-hosted Qwen 3.8 27B.
       - key: LLM_PROVIDER
-        value: ashna
-      - key: ASHNA_API_KEY
+        value: groq
+      - key: GROQ_API_KEY
         sync: false
-      # Optional overrides (documented defaults shown).
-      # - key: PAIRING_AUTO_APPROVE
-      #   value: "false"
-      # - key: ASHNA_BASE_URL
-      #   value: https://api.ashna.ai/v1/api
-      # - key: ASHNA_MODEL
-      #   value: ashna-x1
+      # Optional overrides (the defaults are the production Groq endpoint/model).
+      # - key: GROQ_BASE_URL
+      #   value: https://api.groq.com/openai/v1
+      # - key: GROQ_MODEL
+      #   value: qwen/qwen3.8-27b

@@ -78,14 +78,19 @@ async def complete(
                     finish_reason="tool_calls" if message.get("tool_calls") else "stop",
                 )
 
-            base_url = (settings.openai_compatible_base_url or "").rstrip("/")
+            if settings.llm_provider == "groq":
+                base_url = settings.groq_base_url.rstrip("/")
+                api_key = settings.groq_api_key
+                model = settings.groq_model
+            else:
+                base_url = (settings.openai_compatible_base_url or "").rstrip("/")
+                api_key = settings.openai_compatible_api_key
+                model = settings.openai_compatible_model
             headers: dict[str, str] = {}
-            if settings.openai_compatible_api_key is not None:
-                headers["Authorization"] = (
-                    f"Bearer {settings.openai_compatible_api_key.get_secret_value()}"
-                )
+            if api_key is not None:
+                headers["Authorization"] = f"Bearer {api_key.get_secret_value()}"
             request_body: dict[str, Any] = {
-                "model": settings.openai_compatible_model,
+                "model": model,
                 "messages": messages,
                 "stream": False,
             }

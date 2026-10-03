@@ -59,43 +59,28 @@ See [`docs/deploy-render.md`](docs/deploy-render.md) for the deployment runbook 
 database, Render env vars, HiveMQ Cloud broker, first deploy, WebSocket verification, and the
 free-vs-paid tier decision).
 
-## LLM provider (Ashna AI)
+## LLM provider (Groq)
 
-The chat router (`app/chat/`) is pluggable. The default provider is **Ashna AI's hosted
-`ashna-x1` model** (`LLM_PROVIDER=ashna`); `ollama` and `openai_compatible` remain available
-behind the same env var for local development and offline fallback.
+The default hosted provider is Groq's `qwen/qwen3.8-27b` model. Groq serves an OpenAI-compatible Chat Completions endpoint, so the existing router and tool approval flow are reused. Groq deprecated Qwen 3.6 27B in September 2026; Qwen 3.8 27B is its current 27B successor.
 
-Ashna AI's API is **OpenAI Chat Completions-compatible** (verified against the official
-reference at <https://www.ashna.ai/api-docs> on 2026-10-02), so the adapter reuses the router's
-OpenAI-compatible mapping rather than a bespoke client:
+* Endpoint: `https://api.groq.com/openai/v1/chat/completions`
+* Model: `qwen/qwen3.8-27b`
+* Secret: `GROQ_API_KEY`, provided only through environment/secrets configuration
+* Tool calls use the existing explicit approval and risk-verification process.
 
-* Base URL: `https://api.ashna.ai/v1/api` → `POST /chat/completions`
-* Auth: `Authorization: Bearer <ASHNA_API_KEY>` (the key is env-only and redacted from logs)
-* Model id: `ashna-x1` (listed in Ashna's supported foundation model ids)
-* Tools: native `tools` / `tool_choice` with `tool_calls` round-trips
-* Streaming: OpenAI-compatible SSE (`stream: true`, chunks ending in `data: [DONE]`,
-  tool-call deltas), translated inside the adapter into the router's internal token stream
-* Errors: OpenAI envelope `{ "error": { "message", "type", "code", "param" } }`
-  with 400/401/403/404/429/500 statuses (no numeric rate limits are published; 429/5xx and
-  transport failures are retried up to 3 times with exponential backoff, never 4xx)
-
-### Getting an API key
-
-1. Sign in to <https://app.ashna.ai>.
-2. Open **Account → API** (<https://app.ashna.ai/account?tab=api>) and create a key.
-3. Set it as `ASHNA_API_KEY` in the environment (never in code or in the repo).
+Create a key at <https://console.groq.com/keys>. Configure `GROQ_API_KEY` in the Render dashboard; no API key is committed in this repository.
 
 ### Environment variables
 
-| Variable          | Default                         | Purpose                                             |
-| ----------------- | ------------------------------- | --------------------------------------------------- |
-| `LLM_PROVIDER`    | `ashna`                         | `ashna`, `ollama`, or `openai_compatible`           |
-| `ASHNA_API_KEY`   | —                               | Required when `LLM_PROVIDER=ashna`; startup fails with a clear error if unset (no silent fallback) |
-| `ASHNA_BASE_URL`  | `https://api.ashna.ai/v1/api`   | Ashna OpenAI-compatible base URL                    |
-| `ASHNA_MODEL`     | `ashna-x1`                      | Foundation model id sent as `model`                 |
-| `LLM_TIMEOUT_SECONDS` | `60`                        | Per-request timeout (applies to streaming too)      |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LLM_PROVIDER` | `groq` | `groq`, `ashna`, `ollama`, or `openai_compatible` |
+| `GROQ_API_KEY` | — | Required when `LLM_PROVIDER=groq` |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Groq OpenAI-compatible base URL |
+| `GROQ_MODEL` | `qwen/qwen3.8-27b` | Model id sent to Groq |
+| `LLM_TIMEOUT_SECONDS` | `60` | Per-request timeout |
 
-### Local development without an Ashna key
+### Local development without a hosted key
 
 Set `LLM_PROVIDER=ollama` and run a local Ollama (Docker Compose wires the `ollama` service
 container for you), or point `LLM_PROVIDER=openai_compatible` at any OpenAI-compatible
@@ -103,7 +88,7 @@ endpoint. This keeps the backend fully functional offline.
 
 > `LLM_PROVIDER=ollama` only makes sense locally: a `localhost` Ollama is not reachable from
 > Render. Because settings validation is shared by the app and Alembic, local `alembic` runs
-> also need either a real `ASHNA_API_KEY` or an explicit `LLM_PROVIDER=ollama` override.
+> also need either a real `GROQ_API_KEY` or an explicit `LLM_PROVIDER=ollama` override.
 
 ### Implemented behavior (tool calling & streaming)
 
@@ -155,7 +140,7 @@ generates a temporary key and logs that sessions and encrypted pairing credentia
 invalid after restart. If no bootstrap password is supplied, no owner account is created.
 
 ```bash
-alembic upgrade head              # needs ASHNA_API_KEY, or: LLM_PROVIDER=ollama alembic upgrade head
+alembic upgrade head              # needs GROQ_API_KEY, or: LLM_PROVIDER=ollama alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -365,7 +350,7 @@ production shape is Render + Turso + an external MQTT broker + Ashna `ashna-x1`
   `ALLOW_PLAIN_HTTP_HEALTH_PROBE=true` excepting only the platform's parameterless
   `GET /health` probe.
 - `PUBLIC_API_BASE_URL`, remote `libsql://` URL + `TURSO_AUTH_TOKEN`, persistent random
-  `JWT_SECRET_KEY` (≥32 chars), owner password ≥12 chars, an `ASHNA_API_KEY`, and an external
+  `JWT_SECRET_KEY` (≥32 chars), owner password ≥12 chars, a `GROQ_API_KEY`, and an external
   TLS MQTT broker with non-anonymous credentials — all secrets in env vars/a secrets manager.
 - No state on local disk: the filesystem is ephemeral. Migrations are a controlled deployment
   step (`alembic upgrade head` runs in the Render start command; use `preDeployCommand` on
@@ -377,7 +362,7 @@ production shape is Render + Turso + an external MQTT broker + Ashna `ashna-x1`
 ruff check .
 mypy app
 pytest -q
-alembic check          # needs ASHNA_API_KEY, or: LLM_PROVIDER=ollama alembic check
+alembic check          # needs GROQ_API_KEY, or: LLM_PROVIDER=ollama alembic check
 ```
 
 A local libSQL file is the default for development and tests; set `DATABASE_URL` to a remote

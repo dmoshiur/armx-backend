@@ -93,7 +93,7 @@ For a purely local trial without a Turso account, the same dialect runs against 
 | `CORS_ALLOWED_ORIGINS` | Flutter web origin(s), comma-separated; blank blocks all browser origins (native apps are unaffected) |
 | `MQTT_HOST` | broker host, e.g. `abc123.s1.eu.hivemq.cloud` |
 | `MQTT_USERNAME` / `MQTT_PASSWORD` | broker credentials (HiveMQ **Access Management**) |
-| `ASHNA_API_KEY` | key from <https://app.ashna.ai/account?tab=api> — **required**: startup fails loudly without it, and there is no silent fallback to another provider |
+| `GROQ_API_KEY` | key from <https://console.groq.com/keys> — required for the Groq Qwen 3.8 27B provider |
 
     Optional (add in the dashboard): `ASHNA_BASE_URL` / `ASHNA_MODEL` overrides, or switch
     `LLM_PROVIDER` to `openai_compatible` with `OPENAI_COMPATIBLE_BASE_URL` /
@@ -118,7 +118,7 @@ For a purely local trial without a Turso account, the same dialect runs against 
 | `DATABASE_POOL_PRE_PING=true` | Detects half-open pooled connections; one extra round trip per checkout |
 | `ALLOW_PLAIN_HTTP_HEALTH_PROBE=true` | Allows **only** a parameterless `GET /health` over Render's internal plain-HTTP probe; the platform edge still redirects public HTTP to HTTPS, and every other request keeps requiring TLS |
 | `MQTT_ENABLED=true`, `MQTT_PORT=8883`, `MQTT_KEEPALIVE_SECONDS=30` | External broker transport; `MQTT_TLS_CA_FILE` is intentionally unset so the system CA store validates a managed broker's certificate |
-| `LLM_PROVIDER=ashna`, `ASHNA_API_KEY` | Hosted `ashna-x1` chat provider (openai-compatible) |
+| `LLM_PROVIDER=groq`, `GROQ_API_KEY` | Groq-hosted `qwen/qwen3.8-27b` chat provider (OpenAI-compatible) |
 | `PYTHONUNBUFFERED=1` | Streams logs during build/start |
 
 `PYTHON_VERSION` is not set: the repo ships `.python-version` (`3.12`) at the repository
@@ -264,7 +264,7 @@ Render's ephemeral filesystem — prefer a publicly trusted certificate.
   with no autogenerate diff. `alembic upgrade --sql` (offline) is not supported for batch
   operations that need to reflect a table, so generate SQL from a live database.
 * Because `Settings` validates the full profile, running Alembic locally or in CI requires
-  either a real `ASHNA_API_KEY` or an explicit `LLM_PROVIDER=ollama` override; the Render
+  either a real `GROQ_API_KEY` or an explicit `LLM_PROVIDER=ollama` override; the Render
   start command has the real key from the environment.
 * **URL forms**: `libsql://<db>-<org>.turso.io` (remote), `sqlite+libsql:///./armx.db`
   (relative local file), `sqlite+libsql:////abs/path.db` (**four** slashes for an absolute local
@@ -291,7 +291,7 @@ Outside the explicit local/demo profile:
   ACLs where the broker supports them. Per-device MQTT attestation and command
   acknowledgements are not defined by the current contract; do not treat broker telemetry as
   proof of physical execution.
-- `LLM_PROVIDER=ashna` with a real `ASHNA_API_KEY`; the key is redacted from logs. If the key
+- `LLM_PROVIDER=groq` with a real `GROQ_API_KEY`; the key is redacted from logs. If the key
   is missing the service refuses to start — it never silently falls back.
 - No state on local disk. Anything that looks like persistence (SQLite files, uploaded
   images, cached tokens) must live in Turso or another managed store; the filesystem is wiped
@@ -332,7 +332,7 @@ Record the date, service URL, and observed results here before demo day:
 | --- | --- |
 | Blueprint sync fails mentioning `rootDir` or the build cannot find `pyproject.toml` | A stale `rootDir: backend_python` was restored; the repo is flat — remove it |
 | Deploy cancelled, `/health` returns 400 `tls_required` | `ALLOW_PLAIN_HTTP_HEALTH_PROBE` missing/false; the platform's internal probe is plain HTTP |
-| Start fails with `ASHNA_API_KEY is required when LLM_PROVIDER=ashna` | Blueprint prompt left empty, or a non-Ashna provider was intended; set the key or switch `LLM_PROVIDER` |
+| Start fails with `GROQ_API_KEY is required when LLM_PROVIDER=groq` | Add a Groq API key to the Render dashboard or explicitly select another provider |
 | Start fails with `TURSO_AUTH_TOKEN is required` | Remote `DATABASE_URL` without the token, or a local SQLite URL in the `production` profile |
 | Start fails with `JWT_SECRET_KEY must contain at least 32 characters` | Short/missing signing secret |
 | 503 `service_unavailable` from `/health` | Turso unreachable (URL/token/region) or the instance is stuck on a hanging driver call |
