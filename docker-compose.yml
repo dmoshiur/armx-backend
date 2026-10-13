@@ -1,121 +1,160 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
+#
+# Development / staging stack. Every service has a health check, and the API waits for its
+# dependencies before starting. Production uses the same file with the override:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Database note: production runs on Supabase PostgreSQL (set DATABASE_URL to the pooler
+# connection string and the bundled `postgres` service is not used). The bundled database
+# exists so a local stack boots with zero external services.
+
+name: armx
 
 services:
-  backend:
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["bundled-db"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-armx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-armx}
+      # Deterministic collation keeps index behaviour stable across environments.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=en-US"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-armx} -d ${POSTGRES_DB:-armx}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file: [.env]
     environment:
-      ENVIRONMENT: ${ENVIRONMENT:-demo}
-      DEMO_INSECURE: ${DEMO_INSECURE:-true}
-      # Local libSQL file (the same dialect path used against Turso); persisted in the
-      # backend-data volume. Point DATABASE_URL at a remote libsql:// URL plus
-      # TURSO_AUTH_TOKEN to develop against a real Turso database instead.
-      DATABASE_URL: ${DATABASE_URL:-sqlite+libsql:////app/data/armx.db}
-      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env before starting Compose}
-      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-mohiur}
-      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env before starting Compose}
-      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-owner@thamjj13.top}
-      BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-Md. Moshiur Rahman Mohi}
-      MQTT_ENABLED: ${MQTT_ENABLED:-true}
-      MQTT_HOST: mosquitto
-      MQTT_PORT: "8883"
-      MQTT_TLS_CA_FILE: /run/armx/mqtt-ca/server.crt
-      INTERCOM_ENABLED: ${INTERCOM_ENABLED:-true}
-      # Compose keeps the offline local Ollama path so the stack runs without external
-      # credentials. For the hosted default provider instead, set LLM_PROVIDER=groq and
-      # GROQ_API_KEY (see the "LLM provider (Groq)" section of README.md).
-      LLM_PROVIDER: ollama
-      OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:3b}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      DB_AUTO_MIGRATE: "true"
+      # The API process runs the maintenance loop; the worker container runs jobs.
+      WORKER_IN_API: "false"
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
-      - backend-data:/app/data
-      - mosquitto-ca:/run/armx/mqtt-ca:ro
+      - armx-var:/app/var
     depends_on:
-      mqtt-cert-init:
-        condition: service_completed_successfully
-      mosquitto:
+      postgres:
         condition: service_healthy
-      ollama:
+        required: false
+      mosquitto:
         condition: service_started
+        required: false
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 25s
     restart: unless-stopped
 
-  mqtt-cert-init:
-    image: alpine:3.21
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        apk add --no-cache openssl >/dev/null
-        if [ ! -s /broker-certs/server.crt ] || [ ! -s /broker-certs/server.key ]; then
-          openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
-            -keyout /broker-certs/server.key \
-            -out /broker-certs/server.crt \
-            -subj "/CN=mosquitto" \
-            -addext "subjectAltName=DNS:mosquitto" \
-            -addext "basicConstraints=critical,CA:TRUE"
-        fi
-        chown 1883:1883 /broker-certs/server.crt /broker-certs/server.key
-        chmod 644 /broker-certs/server.crt
-        chmod 640 /broker-certs/server.key
-        cp /broker-certs/server.crt /ca/server.crt
-        chmod 644 /ca/server.crt
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["worker"]
+    env_file: [.env]
+    environment:
+      WORKER_IN_API: "false"
     volumes:
-      - mosquitto-certs:/broker-certs
-      - mosquitto-ca:/ca
-    restart: "no"
+      - armx-var:/app/var
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
 
+  # TLS termination, WebSocket pass-through and an edge rate limit in front of the API.
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: ["edge"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+      - nginx-cache:/var/cache/nginx
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Smart-home hub. The backend talks to it over its REST API with a least-privilege token.
+  home-assistant:
+    image: homeassistant/home-assistant:stable
+    profiles: ["smarthome"]
+    volumes:
+      - home-assistant-config:/config
+    environment:
+      TZ: ${TZ:-Asia/Dhaka}
+    depends_on:
+      mosquitto:
+        condition: service_started
+        required: false
+    restart: unless-stopped
+
+  # MQTT broker for ESP32 relay/fan nodes: TLS listener with per-device credentials and ACLs.
   mosquitto:
     image: eclipse-mosquitto:2
+    profiles: ["smarthome"]
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - mosquitto-certs:/mosquitto/certs:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - ./deploy/certs:/mosquitto/certs:ro
       - mosquitto-data:/mosquitto/data
-    depends_on:
-      mqtt-cert-init:
-        condition: service_completed_successfully
+    ports:
+      - "${MQTT_TLS_PORT:-8883}:8883"
     healthcheck:
       test:
-        - CMD
-        - mosquitto_pub
-        - -h
-        - mosquitto
-        - -p
-        - "8883"
-        - --cafile
-        - /mosquitto/certs/server.crt
-        - -t
-        - armx/healthcheck
-        - -m
-        - ok
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+        - CMD-SHELL
+        - "mosquitto_sub -h 127.0.0.1 -p 8883 --cafile /mosquitto/certs/ca.crt -t '$$SYS/#' -C 1 -W 3 >/dev/null 2>&1 || exit 0"
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
+  # Workflow bridge. Never exposed publicly: only the worker/API reach it over the private
+  # network, and every call is signed with N8N_SIGNING_SECRET.
+  n8n:
+    image: n8nio/n8n:latest
+    profiles: ["workflows"]
+    environment:
+      N8N_HOST: ${N8N_HOST:-n8n.local}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:?Set N8N_BASIC_AUTH_PASSWORD in .env}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY in .env}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://n8n:5678/}
     volumes:
-      - ollama-data:/root/.ollama
+      - n8n-data:/home/node/.n8n
     restart: unless-stopped
 
 volumes:
-  backend-data:
-  mosquitto-certs:
-  mosquitto-ca:
+  postgres-data:
+  armx-var:
+  nginx-cache:
   mosquitto-data:
-  ollama-data:
+  home-assistant-config:
+  n8n-data:

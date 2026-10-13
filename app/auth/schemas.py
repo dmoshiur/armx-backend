@@ -1,98 +1,138 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
+"""Request and response models for the auth and user surfaces."""
+
+from __future__ import annotations
+
+import uuid
 from datetime import datetime
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+__all__ = [
+    "AccountSummary",
+    "ForgotPasswordRequest",
+    "GenericMessage",
+    "LoginRequest",
+    "LogoutRequest",
+    "PatchUserRequest",
+    "RefreshRequest",
+    "ResendVerificationRequest",
+    "ResetPasswordRequest",
+    "SessionSummary",
+    "SignupRequest",
+    "TokenResponse",
+    "VerifyEmailRequest",
+]
 
 
-class RequestModel(BaseModel):
+class SignupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str = Field(default="", max_length=120)
 
-class UserProfileResponse(BaseModel):
-    id: str
-    display_name: str
-    email: str
-    roles: list[str]
-
-
-class LoginRequest(RequestModel):
-    username: str = Field(min_length=1, max_length=64)
-    password: SecretStr = Field(min_length=1, max_length=256)
-    # Device credentials are no longer a prerequisite for account login.
-    device_key: SecretStr | None = Field(default=None, min_length=16, max_length=256)
-    public_key: str = Field(min_length=40, max_length=256)
-    device_name: str = Field(min_length=1, max_length=120)
-    platform: str = Field(min_length=1, max_length=32)
-    client_version: str = Field(min_length=1, max_length=48)
-
-
-class RegisterRequest(RequestModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
-    email: str = Field(min_length=5, max_length=254)
-    display_name: str = Field(min_length=1, max_length=160)
-    password: SecretStr = Field(min_length=12, max_length=256)
-    public_key: str = Field(min_length=40, max_length=256)
-    device_name: str = Field(min_length=1, max_length=120)
-    platform: str = Field(min_length=1, max_length=32)
-    client_version: str = Field(min_length=1, max_length=48)
-
-    @field_validator("email")
+    @field_validator("display_name")
     @classmethod
-    def validate_email(cls, value: str) -> str:
-        import re
-
-        normalized = value.strip().lower()
-        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", normalized):
-            raise ValueError("A valid email address is required")
-        return normalized
+    def _strip(cls, value: str) -> str:
+        return value.strip()
 
 
-class LoginResponse(BaseModel):
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=256)
+    device_name: str = Field(default="", max_length=120)
+    platform: str = Field(default="", max_length=80)
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str = Field(min_length=16, max_length=512)
+
+
+class LogoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_token: str | None = Field(default=None, max_length=512)
+    all_sessions: bool = False
+
+
+class VerifyEmailRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=512)
+
+
+class ResendVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class ForgotPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=16, max_length=512)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class AccountSummary(BaseModel):
+    """Public account view. Never includes a hash, a token, or an internal counter."""
+
+    id: uuid.UUID
+    email: str
+    display_name: str
+    role: str
+    email_verified: bool
+    is_active: bool
+    created_at: datetime
+    last_login_at: datetime | None = None
+
+
+class TokenResponse(BaseModel):
     access_token: str
+    token_type: str = "bearer"  # noqa: S105 - an OAuth token *type*, not a credential
+    expires_in: int
     refresh_token: str
+    refresh_expires_in: int
+    session_id: uuid.UUID | None = None
+    user: AccountSummary
+
+
+class SessionSummary(BaseModel):
+    id: uuid.UUID
+    label: str
+    user_agent: str
+    created_at: datetime
+    last_seen_at: datetime | None
     expires_at: datetime
-    device_id: str
-    device_key: str
-    user: UserProfileResponse
+    revoked_at: datetime | None = None
+    device_id: uuid.UUID | None = None
+    current: bool = False
 
 
-class RegisterResponse(LoginResponse):
-    device_key: str
+class PatchUserRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=120)
 
 
-class RefreshRequest(RequestModel):
-    refresh_token: SecretStr = Field(min_length=16, max_length=512)
+class GenericMessage(BaseModel):
+    """
+    Response for endpoints whose real answer must not depend on whether an account exists.
 
+    ``detail`` is operational guidance only; it never reveals account state.
+    """
 
-class RefreshResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    expires_at: datetime
-
-
-class PairRequest(RequestModel):
-    public_key: str = Field(min_length=40, max_length=256)
-    device_name: str = Field(min_length=1, max_length=120)
-    platform: str = Field(min_length=1, max_length=32)
-    challenge: str | None = Field(default=None, max_length=96)
-    challenge_signature: str | None = Field(default=None, max_length=256)
-
-
-class PairPendingResponse(BaseModel):
-    status: Literal["pending"] = "pending"
-    device_id: str
-    challenge: str
-    message: str = "Awaiting owner approval"
-
-
-class PairApprovedResponse(BaseModel):
-    device_id: str
-    device_key: str
-    site: str = "home"
-    paired_at: datetime
-
-
-class UnpairRequest(RequestModel):
-    device_id: str = Field(min_length=1, max_length=96)
+    message: str
+    detail: str | None = None

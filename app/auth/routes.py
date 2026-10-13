@@ -1,415 +1,378 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-import hmac
-import uuid
-from datetime import UTC, datetime, timedelta
-from hashlib import sha256
-from secrets import token_urlsafe
-from typing import Any, cast
+"""
+Authentication endpoints.
 
-from fastapi import APIRouter, Depends, Response
-from sqlalchemy import select, update
-from sqlalchemy.engine import CursorResult
-from sqlalchemy.exc import IntegrityError
+Every route here is rate limited per client address *and* per account, and every outcome -
+including a failure - is audited with a salted hash of the address rather than the address
+itself. The answers are written so that they cannot be used to enumerate accounts.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.service import write_audit
-from app.auth.dependencies import Principal, public_device_id, public_user_id, require_principal
+from app.api.deps import app_settings, db_session
+from app.auth.dependencies import CurrentPrincipal
+from app.auth.google import (
+    GoogleAuthError,
+    GoogleIdentity,
+    google_authorize_url,
+    verify_google_code,
+)
 from app.auth.schemas import (
+    AccountSummary,
+    ForgotPasswordRequest,
+    GenericMessage,
     LoginRequest,
-    LoginResponse,
+    LogoutRequest,
+    PatchUserRequest,
     RefreshRequest,
-    RefreshResponse,
-    RegisterRequest,
-    RegisterResponse,
-    UserProfileResponse,
+    ResendVerificationRequest,
+    ResetPasswordRequest,
+    SessionSummary,
+    SignupRequest,
+    TokenResponse,
+    VerifyEmailRequest,
 )
-from app.config import Settings, get_settings
-from app.core.errors import APIError, AuthenticationError
-from app.core.security import (
-    create_access_token,
-    decode_ed25519_spki,
-    hash_device_key,
-    hash_password,
-    issue_refresh_token,
-    verify_password,
-)
-from app.db.models import AuthSession, Device, SystemState, User
-from app.db.session import get_session
-from app.ws.manager import connection_manager
+from app.auth.service import AuthService, LoginContext
+from app.config import Settings
+from app.core.enums import Role
+from app.core.errors import APIError, ErrorCode
+from app.security.ratelimit import RateLimiter, limit_key
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_GENERIC_SIGNUP = (
+    "Check your inbox. If that address can be registered, a verification link is on its way."
+)
+_GENERIC_RESET = "If that address has an account, a password reset link is on its way."
 
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+def _context(request: Request, *, device_name: str = "", platform: str = "") -> LoginContext:
+    return LoginContext(
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:400],
+        device_name=device_name,
+        platform=platform,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=201)
-async def register(
-    body: RegisterRequest,
-    response: Response,
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> RegisterResponse:
-    """Create an account and enroll this device in one atomic transaction.
-
-    The database singleton arbitrates the first-admin claim. Roles are assigned only
-    after its NULL-to-user compare-and-set succeeds, so concurrent requests cannot
-    both become administrators.
+async def _limit(
+    request: Request,
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    bucket: str,
+    extra: str = "",
+) -> None:
     """
-    try:
-        decode_ed25519_spki(body.public_key)
-    except (ValueError, TypeError):
-        raise APIError("invalid_device_key", "Invalid device public key", status_code=422) from None
+    Apply the auth rate limit and attach the headers a client needs to back off.
 
-    username = body.username.strip().lower()
-    email = body.email.strip().lower()
-    display_name = body.display_name.strip()
-    if not display_name:
-        raise APIError("invalid_request", "Display name is required", status_code=422)
-    if await session.scalar(select(User.id).where(User.username == username)) is not None:
+    The key mixes the client address with the endpoint bucket; ``extra`` adds a hashed account
+    identifier so a shared office address cannot hammer one login form.
+    """
+    from app.core.privacy import hash_ip
+
+    limiter = RateLimiter(settings)
+    ip_hash = hash_ip(request.client.host if request.client else None, salt=settings.jwt_key())
+    key = limit_key("auth", bucket, ip_hash or "", extra)
+    result = await limiter.check(session, key=key, spec=settings.auth_rate_limit_spec)
+    # The middleware copies these onto the response so a well-behaved client can back off.
+    request.state.rate_limit_headers = result.headers()
+    if not result.allowed:
         raise APIError(
-            "auth_registration_conflict", "Account details are already in use", status_code=409
-        )
-    if await session.scalar(select(User.id).where(User.email == email)) is not None:
-        raise APIError(
-            "auth_registration_conflict", "Account details are already in use", status_code=409
+            ErrorCode.RATE_LIMITED,
+            "Too many attempts. Try again shortly.",
+            status_code=429,
+            retryable=True,
+            headers=result.headers(),
         )
 
-    now = datetime.now(UTC)
-    user = User(
-        username=username,
-        email=email,
-        display_name=display_name,
-        password_hash=hash_password(body.password.get_secret_value()),
-        roles=["user"],
+
+@router.post("/signup", response_model=GenericMessage, status_code=status.HTTP_202_ACCEPTED)
+async def signup(
+    payload: SignupRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Create an account and send a verification link (always the same answer)."""
+    await _limit(request, session, settings, bucket="signup")
+    service = AuthService(settings)
+    await service.signup(
+        session,
+        email=payload.email,
+        password=payload.password,
+        display_name=payload.display_name,
+        context=_context(request),
     )
-    try:
-        session.add(user)
-        await session.flush()
-
-        # initialize_database_state creates this singleton at application startup.
-        # The conditional update is the cross-worker atomic first-admin election.
-        claim = await session.execute(
-            update(SystemState)
-            .where(SystemState.id == 1, SystemState.initial_admin_claimed.is_(False))
-            .values(first_admin_user_id=user.id, initial_admin_claimed=True)
-        )
-        if claim.rowcount == 1:
-            user.roles = ["user", "owner", "admin"]
-
-        raw_device_key = f"arx.device.{token_urlsafe(36)}"
-        device = Device(
-            public_id=f"device-{uuid.uuid4().hex[:8]}",
-            owner_id=user.id,
-            name=body.device_name.strip(),
-            platform=body.platform.strip().lower(),
-            public_key=body.public_key,
-            device_key_hash=hash_device_key(raw_device_key),
-            site="home",
-            kind="OTHER",
-            state_json={
-                "id": "",
-                "name": body.device_name.strip(),
-                "site": "home",
-                "kind": "OTHER",
-                "online": True,
-                "risk_tier": "MEDIUM",
-                "firmware": body.client_version,
-                "last_seen_at": now.isoformat(),
-                "relays": [],
-                "sensors": [],
-                "tags": {},
-            },
-            last_seen_at=now,
-            paired_at=now,
-        )
-        device.state_json["id"] = device.public_id
-        session.add(device)
-        await session.flush()
-
-        refresh_token, refresh_hash = issue_refresh_token()
-        auth_session = AuthSession(
-            user_id=user.id,
-            device_id=device.id,
-            refresh_token_hash=refresh_hash,
-            expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),
-        )
-        session.add(auth_session)
-        await session.flush()
-        access_token, access_expiry = create_access_token(
-            settings,
-            user_id=str(user.id),
-            device_id=str(device.id),
-            session_id=str(auth_session.id),
-            roles=list(user.roles),
-        )
-        await write_audit(
-            session,
-            actor_user_id=user.id,
-            subject_user_id=user.id,
-            device_id=device.id,
-            action="auth.register",
-            target=user.username,
-            detail="Account created and initial device enrolled.",
-            metadata={"first_admin": "admin" in user.roles},
-        )
-        await session.commit()
-    except IntegrityError:
-        await session.rollback()
-        raise APIError(
-            "auth_registration_conflict", "Account details are already in use", status_code=409
-        ) from None
-
-    response.headers["Cache-Control"] = "no-store"
-    return RegisterResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=access_expiry,
-        device_id=device.public_id,
-        user=UserProfileResponse(
-            id=public_user_id(user),
-            display_name=user.display_name,
-            email=user.email,
-            roles=list(user.roles),
-        ),
-        device_key=raw_device_key,
+    return GenericMessage(
+        message=_GENERIC_SIGNUP,
+        detail="Verify your email address before signing in.",
     )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=TokenResponse)
 async def login(
-    body: LoginRequest,
-    response: Response,
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> LoginResponse:
-    username = body.username.strip().lower()
-    user = await session.scalar(select(User).where(User.username == username))
-    if user is None:
-        raise AuthenticationError("auth_invalid_credentials", "Invalid username or password")
-
-    now = datetime.now(UTC)
-    if not user.is_active or (user.locked_until and _as_utc(user.locked_until) > now):
-        raise APIError("auth_account_locked", "This account is locked", status_code=403)
-
-    if not verify_password(user.password_hash, body.password.get_secret_value()):
-        user.failed_login_count += 1
-        if user.failed_login_count >= settings.auth_max_failures:
-            user.locked_until = now + timedelta(seconds=settings.auth_lockout_seconds)
-        await session.commit()
-        raise AuthenticationError("auth_invalid_credentials", "Invalid username or password")
-
-    user.failed_login_count = 0
-    user.locked_until = None
-    try:
-        decode_ed25519_spki(body.public_key)
-    except (ValueError, TypeError):
-        raise APIError("invalid_device_key", "Invalid device public key", status_code=422) from None
-
-    # Enroll the install after verifying the account password. Device identities are
-    # scoped per account so shared computers can be used by multiple account holders.
-    device = await session.scalar(
-        select(Device).where(Device.owner_id == user.id, Device.public_key == body.public_key)
-    )
-    candidate_device_key = (
-        body.device_key.get_secret_value() if body.device_key is not None else ""
-    )
-    # Preserve a valid credential to avoid rotating it on each sign-in. A stale or
-    # missing device credential never blocks password login; it is simply replaced.
-    preserve_device_key = (
-        device is not None
-        and bool(candidate_device_key)
-        and hmac.compare_digest(
-            hash_device_key(candidate_device_key), device.device_key_hash
-        )
-    )
-    raw_device_key = (
-        candidate_device_key
-        if preserve_device_key
-        else f"arx.device.{token_urlsafe(36)}"
-    )
-    now = datetime.now(UTC)
-    if device is None:
-        device = Device(
-            public_id=f"device-{uuid.uuid4().hex[:8]}",
-            owner_id=user.id,
-            name=body.device_name.strip(),
-            platform=body.platform.strip().lower(),
-            public_key=body.public_key,
-            device_key_hash=hash_device_key(raw_device_key),
-            site="home",
-            kind="OTHER",
-            state_json={
-                "id": "",
-                "name": body.device_name.strip(),
-                "site": "home",
-                "kind": "OTHER",
-                "online": True,
-                "risk_tier": "MEDIUM",
-                "firmware": body.client_version,
-                "last_seen_at": now.isoformat(),
-                "relays": [],
-                "sensors": [],
-                "tags": {},
-            },
-            last_seen_at=now,
-            paired_at=now,
-        )
-        session.add(device)
-        await session.flush()
-        device.state_json["id"] = device.public_id
-    else:
-        if not device.is_active or device.revoked_at is not None:
-            raise APIError(
-                "auth_device_revoked", "This device is no longer authorized", status_code=403
-            )
-        device.name = body.device_name.strip()
-        device.platform = body.platform.strip().lower()
-        if not preserve_device_key:
-            device.device_key_hash = hash_device_key(raw_device_key)
-    device.last_seen_at = now
-    refresh_token, refresh_hash = issue_refresh_token()
-    session_expiry = now + timedelta(seconds=settings.refresh_token_ttl_seconds)
-    auth_session = AuthSession(
-        user_id=user.id,
-        device_id=device.id,
-        refresh_token_hash=refresh_hash,
-        expires_at=session_expiry,
-    )
-    session.add(auth_session)
-    await session.flush()
-    access_token, access_expiry = create_access_token(
-        settings,
-        user_id=str(user.id),
-        device_id=str(device.id),
-        session_id=str(auth_session.id),
-        roles=list(user.roles),
-    )
-    await write_audit(
+    payload: LoginRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> TokenResponse:
+    """Exchange credentials for an access token and a rotating refresh token."""
+    await _limit(
+        request,
         session,
-        actor_user_id=user.id,
-        subject_user_id=user.id,
-        device_id=device.id,
-        action="auth.login",
-        target=public_device_id(device),
-        detail="User signed in.",
+        settings,
+        bucket="login",
+        extra=limit_key(payload.email.strip().lower())[:16],
     )
-    await session.commit()
-    response.headers["Cache-Control"] = "no-store"
-    return LoginResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=access_expiry,
-        device_id=public_device_id(device),
-        device_key=raw_device_key,
-        user=UserProfileResponse(
-            id=public_user_id(user),
-            display_name=user.display_name,
-            email=user.email,
-            roles=list(user.roles),
-        ),
+    service = AuthService(settings)
+    return await service.login(
+        session,
+        email=payload.email,
+        password=payload.password,
+        context=_context(request, device_name=payload.device_name, platform=payload.platform),
     )
 
 
-@router.post("/refresh", response_model=RefreshResponse)
+@router.post("/refresh", response_model=TokenResponse)
 async def refresh(
-    body: RefreshRequest,
-    response: Response,
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> RefreshResponse:
-    raw_token = body.refresh_token.get_secret_value()
-    refresh_hash = sha256(raw_token.encode("utf-8")).hexdigest()
-    auth_session = await session.scalar(
-        select(AuthSession).where(AuthSession.refresh_token_hash == refresh_hash)
-    )
-    now = datetime.now(UTC)
-    if (
-        auth_session is None
-        or auth_session.revoked_at is not None
-        or _as_utc(auth_session.expires_at) <= now
-    ):
-        raise AuthenticationError("auth_refresh_rejected", "Refresh token was rejected")
+    payload: RefreshRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> TokenResponse:
+    """
+    Rotate a refresh token.
 
-    user = await session.get(User, auth_session.user_id)
-    device = await session.get(Device, auth_session.device_id)
-    if (
-        user is None
-        or not user.is_active
-        or device is None
-        or not device.is_active
-        or device.revoked_at
-    ):
-        auth_session.revoked_at = now
-        await session.commit()
-        if user is not None:
-            await connection_manager.close_user(user.id)
-        elif device is not None:
-            await connection_manager.close_device(device.id)
-        raise AuthenticationError("auth_refresh_rejected", "Refresh token was rejected")
-
-    # Compare-and-set prevents two concurrent refresh requests from both rotating the
-    # same token; a replayed request observes rowcount=0 and receives a generic rejection.
-    consumed = cast(
-        CursorResult[Any],
-        await session.execute(
-            update(AuthSession)
-            .where(
-                AuthSession.id == auth_session.id,
-                AuthSession.revoked_at.is_(None),
-                AuthSession.expires_at > now,
-            )
-            .values(revoked_at=now)
-            .execution_options(synchronize_session=False)
-        ),
-    )
-    if consumed.rowcount != 1:
-        await session.rollback()
-        raise AuthenticationError("auth_refresh_rejected", "Refresh token was rejected")
-    auth_session.revoked_at = now
-    next_refresh, next_hash = issue_refresh_token()
-    next_session = AuthSession(
-        user_id=user.id,
-        device_id=device.id,
-        refresh_token_hash=next_hash,
-        expires_at=now + timedelta(seconds=settings.refresh_token_ttl_seconds),
-    )
-    session.add(next_session)
-    await session.flush()
-    access_token, access_expiry = create_access_token(
-        settings,
-        user_id=str(user.id),
-        device_id=str(device.id),
-        session_id=str(next_session.id),
-        roles=list(user.roles),
-    )
-    await session.commit()
-    await connection_manager.close_device(device.id)
-    response.headers["Cache-Control"] = "no-store"
-    return RefreshResponse(
-        access_token=access_token,
-        refresh_token=next_refresh,
-        expires_at=access_expiry,
+    The presented token is consumed; a client that retries with the same value gets a terminated
+    session, because reuse is treated as token theft.
+    """
+    await _limit(request, session, settings, bucket="refresh")
+    return await AuthService(settings).refresh(
+        session, refresh_token=payload.refresh_token, context=_context(request)
     )
 
 
-@router.post("/logout", status_code=204)
+@router.post("/logout", response_model=GenericMessage)
 async def logout(
-    principal: Principal = Depends(require_principal),
-    session: AsyncSession = Depends(get_session),
-) -> Response:
-    principal.auth_session.revoked_at = datetime.now(UTC)
-    await write_audit(
+    payload: LogoutRequest,
+    request: Request,
+    principal: CurrentPrincipal,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Revoke the current session, or every session for the account."""
+    count = await AuthService(settings).logout(
         session,
-        actor_user_id=principal.user.id,
-        subject_user_id=principal.user.id,
-        device_id=principal.device.id,
-        action="auth.logout",
-        target=public_device_id(principal.device),
-        detail="User signed out.",
+        user=principal.user,
+        current_session_id=principal.session_id,
+        refresh_token=payload.refresh_token,
+        all_sessions=payload.all_sessions,
+        context=_context(request),
     )
-    await session.commit()
-    await connection_manager.close_device(principal.device.id)
-    return Response(status_code=204)
+    return GenericMessage(message="Signed out", detail=f"{count} session(s) revoked.")
+
+
+@router.post("/verify-email", response_model=GenericMessage)
+async def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Consume a verification link."""
+    await _limit(request, session, settings, bucket="verify")
+    await AuthService(settings).verify_email(
+        session, token=payload.token, context=_context(request)
+    )
+    return GenericMessage(message="Email verified", detail="You can sign in now.")
+
+
+@router.post("/resend-verification", response_model=GenericMessage, status_code=202)
+async def resend_verification(
+    payload: ResendVerificationRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Send another verification link (same answer whether or not the account exists)."""
+    await _limit(request, session, settings, bucket="resend")
+    await AuthService(settings).resend_verification(
+        session, email=payload.email, context=_context(request)
+    )
+    return GenericMessage(message=_GENERIC_SIGNUP)
+
+
+@router.post("/forgot-password", response_model=GenericMessage, status_code=202)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Request a reset link. The answer never reveals whether the address is registered."""
+    await _limit(
+        request,
+        session,
+        settings,
+        bucket="forgot",
+        extra=limit_key(payload.email.strip().lower())[:16],
+    )
+    await AuthService(settings).request_password_reset(
+        session, email=payload.email, context=_context(request)
+    )
+    return GenericMessage(message=_GENERIC_RESET)
+
+
+@router.post("/reset-password", response_model=GenericMessage)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    request: Request,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Set a new password from a reset link; every existing session is revoked."""
+    await _limit(request, session, settings, bucket="reset")
+    await AuthService(settings).reset_password(
+        session, token=payload.token, password=payload.password, context=_context(request)
+    )
+    return GenericMessage(
+        message="Password updated", detail="Sign in again with your new password."
+    )
+
+
+@router.get("/google/start")
+async def google_start(
+    settings: Settings = Depends(app_settings),
+) -> dict[str, str]:
+    """Return the Google consent URL to open (state is signed, so it cannot be forged)."""
+    if not settings.google_oauth_enabled:
+        raise APIError(
+            ErrorCode.INTEGRATION_DISABLED, "Google sign-in is not enabled", status_code=404
+        )
+    url, state = google_authorize_url(settings)
+    return {"authorization_url": url, "state": state}
+
+
+@router.get("/google/callback", response_model=TokenResponse)
+async def google_callback(
+    code: str,
+    state: str,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> TokenResponse:
+    """
+    Complete the Google authorization-code flow.
+
+    The ID token's signature, issuer and audience are verified against Google's JWKS, and the
+    address must be verified by Google. ``hd``/allowed-domain restrictions are applied when the
+    operator configured them.
+    """
+    await _limit(request, session, settings, bucket="google")
+    if not settings.google_oauth_enabled:
+        raise APIError(
+            ErrorCode.INTEGRATION_DISABLED, "Google sign-in is not enabled", status_code=404
+        )
+    try:
+        identity: GoogleIdentity = await verify_google_code(settings, code=code, state=state)
+    except GoogleAuthError as exc:
+        raise APIError(
+            ErrorCode.UNAUTHENTICATED, str(exc), status_code=401, retryable=exc.retryable
+        ) from exc
+
+    if not identity.email_verified:
+        raise APIError(
+            ErrorCode.EMAIL_NOT_VERIFIED, "Google did not report a verified email", status_code=403
+        )
+    allowed = settings.google_allowed_domain_set
+    if allowed and identity.email.rsplit("@", 1)[-1].lower() not in allowed:
+        raise APIError(
+            ErrorCode.FORBIDDEN, "This Google account is not allowed to sign in", status_code=403
+        )
+
+    tokens = await AuthService(settings).login_with_google(
+        session,
+        google_sub=identity.subject,
+        email=identity.email,
+        email_verified=identity.email_verified,
+        display_name=identity.name,
+        context=_context(request),
+    )
+    # A desktop or web client that followed the redirect gets no JSON body it can read safely,
+    # so the refresh token is also set as an httpOnly cookie for that flow.
+    response.set_cookie(
+        "armx_refresh",
+        tokens.refresh_token,
+        httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        max_age=settings.refresh_token_ttl_seconds,
+        path="/auth",
+    )
+    return tokens
+
+
+@router.get("/me", response_model=AccountSummary)
+async def me(principal: CurrentPrincipal) -> AccountSummary:
+    """The signed-in account."""
+    return AuthService.account_summary(principal.user)
+
+
+@router.patch("/me", response_model=AccountSummary)
+async def patch_me(
+    payload: PatchUserRequest,
+    principal: CurrentPrincipal,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> AccountSummary:
+    """Rename the account holder."""
+    return await AuthService(settings).update_profile(
+        session, user=principal.user, display_name=payload.display_name
+    )
+
+
+@router.get("/sessions", response_model=list[SessionSummary])
+async def list_sessions(
+    principal: CurrentPrincipal,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> list[SessionSummary]:
+    """List the caller's active sessions, with the current one flagged."""
+    return await AuthService(settings).list_sessions(
+        session, user=principal.user, current_session_id=principal.session_id
+    )
+
+
+@router.delete("/sessions/{session_id}", response_model=GenericMessage)
+async def revoke_session(
+    session_id: str,
+    request: Request,
+    principal: CurrentPrincipal,
+    session: AsyncSession = Depends(db_session),
+    settings: Settings = Depends(app_settings),
+) -> GenericMessage:
+    """Revoke one of the caller's own sessions."""
+    import uuid as _uuid
+
+    try:
+        parsed = _uuid.UUID(session_id)
+    except ValueError as exc:
+        raise APIError(
+            ErrorCode.INVALID_REQUEST, "session_id must be a UUID", status_code=400
+        ) from exc
+    await AuthService(settings).revoke_session(
+        session, user=principal.user, session_id=parsed, context=_context(request)
+    )
+    return GenericMessage(message="Session revoked")
+
+
+def role_hint(role: Role) -> str:
+    """Small helper used by the admin routes and the CLI to describe a role."""
+    return role.value

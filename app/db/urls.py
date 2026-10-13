@@ -1,84 +1,136 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-"""Database URL helpers shared by settings, the engine, and Alembic.
+"""
+Database URL handling.
 
-Turso hands out credentials as ``libsql://<database>.<org>.turso.io`` (or an ``https://``
-URL for the HTTP API), while SQLAlchemy needs a dialect-qualified URL.  These helpers
-normalize what an operator pastes into ``DATABASE_URL`` without ever rewriting the
-credentials themselves - auth tokens stay in ``TURSO_AUTH_TOKEN`` and never enter the URL.
+The application always speaks to the database through SQLAlchemy's async engine. In
+production that is PostgreSQL - self-hosted or Supabase, whose connection string is a
+plain PostgreSQL URL (``...pooler.supabase.com:6543/postgres`` for the transaction
+pooler, ``:5432`` for a direct connection). Locally it is SQLite so the stack boots with
+zero external services.
+
+The security policy does not vary by dialect: risk tiers, approvals and audit rows are
+identical either way.
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
-_TURSO_SCHEMES = {"libsql", "libsqls", "http", "https"}
-_SECURE_SCHEMES = {"libsql", "libsqls", "https"}
+from app.core.logging import get_logger
+
+__all__ = [
+    "POSTGRES_DRIVER",
+    "async_database_url",
+    "ensure_sqlite_directory",
+    "is_postgres",
+    "is_sqlite",
+    "redacted_database_url",
+    "sync_database_url",
+]
+
+#: Accepted base schemes. A driver suffix (``postgresql+psycopg``) is tolerated and normalised,
+#: so passing an already-normalised URL back in is harmless - which matters because a settings
+#: object may hold either form depending on where it came from.
+logger = get_logger("db.urls")
+
+_POSTGRES_SCHEMES = {"postgres", "postgresql"}
+_SQLITE_SCHEMES = {"sqlite", "sqlite+aiosqlite", "sqlite+pysqlite"}
+
+#: The async driver this project ships for PostgreSQL.
+POSTGRES_DRIVER = "psycopg"
 
 
-class DatabaseBackend(StrEnum):
-    """Supported persistence backends."""
+def async_database_url(raw_url: str) -> str:
+    """Normalise an operator-supplied URL to the async driver this app uses."""
+    url = (raw_url or "").strip()
+    if not url:
+        raise ValueError("DATABASE_URL is required")
+    scheme, _, rest = url.partition("://")
+    if not rest:
+        raise ValueError("DATABASE_URL must include a scheme separator, e.g. postgresql://...")
+    normalised = scheme.lower()
+    base, _, requested_driver = normalised.partition("+")
+    if base in _POSTGRES_SCHEMES:
+        if requested_driver and requested_driver != POSTGRES_DRIVER:
+            logger.info(
+                "DATABASE_URL asked for driver %r; using the shipped driver %r",
+                requested_driver,
+                POSTGRES_DRIVER,
+            )
+        return f"postgresql+{POSTGRES_DRIVER}://{rest}"
+    if base == "sqlite":
+        if requested_driver in {"aiosqlite", "pysqlite"}:
+            return f"sqlite+{requested_driver}://{rest}"
+        return f"sqlite+aiosqlite://{rest}"
+    raise ValueError(
+        f"unsupported DATABASE_URL scheme {scheme!r}: "
+        "expected postgresql://, postgresql+psycopg:// or sqlite://"
+    )
 
-    AIOSQLITE = "aiosqlite"
-    LIBSQL = "libsql"
-    UNSUPPORTED = "unsupported"
+
+def sync_database_url(raw_url: str) -> str:
+    """Synchronous equivalent, used by Alembic's offline mode and by ``pg_dump``."""
+    url = async_database_url(raw_url)
+    scheme, _, rest = url.partition("://")
+    if scheme.startswith("postgresql"):
+        return f"postgresql+psycopg://{rest}"
+    return f"sqlite://{rest}"
 
 
-def normalize_database_url(raw: str) -> str:
-    """Return a SQLAlchemy-qualified URL for the configured database.
+def is_postgres(raw_url: str) -> bool:
+    return async_database_url(raw_url).startswith("postgresql")
 
-    ``libsql://``, ``https://`` and ``http://`` Turso URLs are rewritten to
-    ``sqlite+libsql://`` so an operator can paste the value printed by the Turso CLI.
+
+def is_sqlite(raw_url: str) -> bool:
+    return async_database_url(raw_url).startswith("sqlite")
+
+
+def redacted_database_url(raw_url: str) -> str:
+    """Safe-to-log form: password replaced, query parameters dropped."""
+    try:
+        url = async_database_url(raw_url)
+    except ValueError:
+        return "[invalid database url]"
+    scheme, _, rest = url.partition("://")
+    if scheme.startswith("sqlite"):
+        return f"{scheme}://{rest.split('?', 1)[0]}"
+    parts = urlsplit(url)
+    netloc = parts.netloc
+    if "@" in netloc:
+        credentials, _, host = netloc.rpartition("@")
+        user, _, _password = credentials.partition(":")
+        netloc = f"{user}:***@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def sqlite_file_path(raw_url: str) -> Path | None:
     """
+    Filesystem path for a file-backed SQLite URL, or ``None`` for an in-memory database.
 
-    value = raw.strip()
-    scheme = value.split("://", 1)[0].lower() if "://" in value else ""
-    if scheme not in _TURSO_SCHEMES:
-        return value
-    parts = urlsplit(value)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query.setdefault("secure", "true" if parts.scheme in _SECURE_SCHEMES else "false")
-    return urlunsplit(
-        ("sqlite+libsql", parts.netloc, parts.path, urlencode(sorted(query.items())), "")
-    )
-
-
-def database_backend(raw: str) -> DatabaseBackend:
-    """Classify a database URL without connecting to it."""
-
-    scheme = raw.split("://", 1)[0].lower() if "://" in raw else ""
-    if scheme == "sqlite+libsql":
-        return DatabaseBackend.LIBSQL
-    if scheme in {"sqlite+aiosqlite", "sqlite"}:
-        return DatabaseBackend.AIOSQLITE
-    return DatabaseBackend.UNSUPPORTED
-
-
-def libsql_target_is_remote(raw: str) -> bool:
-    """Return True when a libSQL URL points at a server rather than a local file."""
-
-    return database_backend(raw) is DatabaseBackend.LIBSQL and bool(
-        urlsplit(normalize_database_url(raw)).netloc
-    )
-
-
-def _remote_secure_flag(raw: str) -> str | None:
-    parts = urlsplit(normalize_database_url(raw))
-    if not parts.netloc:
+    ``sqlite+aiosqlite:///./data/armx.db`` is relative to the working directory;
+    ``sqlite+aiosqlite:////srv/armx/armx.db`` (four slashes) is absolute.
+    """
+    url = async_database_url(raw_url)
+    if not url.startswith("sqlite"):
         return None
-    return dict(parse_qsl(parts.query, keep_blank_values=True)).get("secure")
+    rest = url.partition("://")[2].split("?", 1)[0]
+    # ``sqlite:///:memory:`` and ``sqlite:///`` arrive with a leading slash: strip it before
+    # deciding, or an in-memory database looks like a file called ":memory:" - and
+    # ``ensure_sqlite_directory`` would then try to create a directory that should not exist.
+    stripped = rest.lstrip("/")
+    if not stripped or stripped.startswith(":memory:") or "mode=memory" in rest:
+        return None
+    if rest.startswith("//"):  # four slashes in the URL: an absolute path
+        return Path("/" + stripped)
+    return Path(stripped)
 
 
-def libsql_requests_plaintext(raw: str) -> bool:
-    """Return True when a remote libSQL URL explicitly disables TLS (``secure=false``)."""
-
-    secure = _remote_secure_flag(raw)
-    return secure is not None and secure.strip().lower() in {"false", "0", "no"}
-
-
-def libsql_requests_tls(raw: str) -> bool:
-    """Return True when a remote libSQL URL states TLS explicitly (``secure=true``)."""
-
-    secure = _remote_secure_flag(raw)
-    return secure is not None and secure.strip().lower() in {"true", "1", "yes"}
+def ensure_sqlite_directory(raw_url: str) -> None:
+    """Create the parent directory of a file-backed SQLite database."""
+    path = sqlite_file_path(raw_url)
+    if path is None:
+        return
+    target = path if path.is_absolute() else Path.cwd() / path
+    target.parent.mkdir(parents=True, exist_ok=True)

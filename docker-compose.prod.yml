@@ -1,0 +1,121 @@
+# Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
+#
+# Production override:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# What it changes, and why:
+#   * resource limits          - one runaway integration cannot starve the API of CPU or RAM
+#   * no bind-mounted source   - the running artifact is the built image, so a container cannot
+#                                execute code that was never reviewed
+#   * log rotation             - a full disk is the most common cause of a self-inflicted outage
+#   * restart policies + healthchecks - a crashed process is restarted, an unhealthy one is
+#                                replaced by the orchestrator rather than left serving traffic
+#   * the bundled database is off; Supabase is the production database (DATABASE_URL).
+
+services:
+  api:
+    profiles: ["!bundled-db"]
+    environment:
+      ENVIRONMENT: production
+      DEMO_INSECURE: "false"
+      DB_AUTO_MIGRATE: "true"
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+      WORKER_IN_API: "false"
+      LOG_FORMAT: json
+    volumes:
+      # Named volumes only: no host source mounts in production.
+      - armx-var:/app/var
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPU_LIMIT:-2.0}"
+          memory: ${API_MEMORY_LIMIT:-1g}
+        reservations:
+          cpus: "0.25"
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always
+    security_opt: ["no-new-privileges:true"]
+    read_only: false
+
+  worker:
+    environment:
+      ENVIRONMENT: production
+      DEMO_INSECURE: "false"
+      WORKER_IN_API: "false"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      LOG_FORMAT: json
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-1.5}"
+          memory: ${WORKER_MEMORY_LIMIT:-1g}
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always
+    security_opt: ["no-new-privileges:true"]
+
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always
+
+  n8n:
+    environment:
+      N8N_PROTOCOL: https
+      N8N_SECURE_COOKIE: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always
+
+  home-assistant:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always
+
+  mosquitto:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: always

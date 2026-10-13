@@ -1,13 +1,30 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
+# Secrets and environment
 .env
-.venv/
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Python
 __pycache__/
 *.py[cod]
-*.db
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
+.venv/
+venv/
 .mypy_cache/
+.ruff_cache/
+.pytest_cache/
 .coverage
 htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local runtime data (dev SQLite, image sandbox, site sandbox, backups, outbox)
+data/
+armx.db
+armx.db-*
+var/
+backups/
