@@ -20,7 +20,7 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
@@ -28,7 +28,7 @@ from app.core.enums import Role
 from app.core.passwords import hash_password
 from app.core.time import utcnow
 from app.db.base import Base
-from app.db.models import Session, User
+from app.db.models import MailOutboxMessage, Session, User
 from app.db.session import dispose_engines, get_engine
 from app.main import create_app
 from app.registry.core import ToolRegistry
@@ -197,6 +197,67 @@ async def session_row_factory(db: AsyncSession):
         return session
 
     return create
+
+
+# ------------------------------------------------------------------- api helpers
+@pytest_asyncio.fixture
+async def tokens_for(client: AsyncClient):
+    """
+    Sign in through the API and return the token payload.
+
+    Uses the real login endpoint (not a hand-minted token) so tests exercise the same path a
+    client does, including lockout and rate-limit bookkeeping.
+    """
+
+    async def login(
+        email: str,
+        password: str = "correct-horse-battery-staple",  # noqa: S107 - fixture, not a credential
+    ) -> dict:
+        response = await client.post(
+            "/auth/login", json={"email": email, "password": password, "device_name": "pytest"}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    return login
+
+
+@pytest_asyncio.fixture
+async def auth_headers(client: AsyncClient, tokens_for):
+    """Bearer headers for an existing account."""
+
+    async def headers(
+        email: str,
+        password: str = "correct-horse-battery-staple",  # noqa: S107 - fixture, not a credential
+    ) -> dict[str, str]:
+        payload = await tokens_for(email, password)
+        return {"Authorization": f"Bearer {payload['access_token']}"}
+
+    return headers
+
+
+@pytest_asyncio.fixture
+async def outbox_token(db: AsyncSession):
+    """
+    Pull the newest link token out of the mail outbox.
+
+    Email delivery defaults to the outbox, so verification and reset links are readable in a test
+    without an SMTP server. The token is stored hashed in ``email_tokens``; this helper reads the
+    delivered text instead, which is exactly what the recipient would click.
+    """
+    import re
+
+    async def fetch(*, template: str | None = None) -> str:
+        statement = select(MailOutboxMessage).order_by(MailOutboxMessage.created_at.desc())
+        if template:
+            statement = statement.where(MailOutboxMessage.template == template)
+        row = (await db.execute(statement)).scalars().first()
+        assert row is not None, f"no {template or 'any'} email in the outbox"
+        match = re.search(r"[?&]token=([A-Za-z0-9_\-]+)", row.body_text)
+        assert match is not None, "email body has no token link"
+        return match.group(1)
+
+    return fetch
 
 
 def pytest_configure(config: pytest.Config) -> None:

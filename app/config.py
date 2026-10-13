@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["console", "json"] = "console"
     demo_insecure: bool = True
+    #: Local-development convenience: authenticate as the first admin without a token.
+    #: Two independent settings must agree (ENVIRONMENT=development *and* this flag), and the
+    #: production guard below refuses to boot while either is satisfied.
+    dev_auth_bypass: bool = False
     api_host: str = "0.0.0.0"  # noqa: S104 - the container/network boundary provides the isolation
     api_port: int = 8000
     web_concurrency: int = Field(default=2, ge=1, le=32)
@@ -313,6 +317,11 @@ class Settings(BaseSettings):
         if is_production:
             if self.demo_insecure:
                 problems.append("DEMO_INSECURE must be false in production (HTTPS is mandatory)")
+            if self.dev_auth_bypass:
+                problems.append(
+                    "DEV_AUTH_BYPASS must be false in production: it authenticates every request "
+                    "as the first administrator"
+                )
             if self.uses_sqlite:
                 problems.append(
                     "DATABASE_URL must point at PostgreSQL/Supabase in production, not SQLite"

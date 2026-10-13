@@ -309,7 +309,10 @@ def _include_web_builder(application: FastAPI) -> None:
 #: Feature routers are included through explicit functions rather than a dynamic scan, so the
 #: API surface is greppable and a broken module fails loudly at startup instead of silently
 #: dropping routes. Entries are appended as each build phase lands.
-_FEATURE_ROUTERS: tuple[Callable[[FastAPI], None], ...] = ()
+_FEATURE_ROUTERS: tuple[Callable[[FastAPI], None], ...] = (
+    _include_auth,
+    _include_users,
+)
 
 
 app = create_app()

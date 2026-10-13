@@ -166,6 +166,8 @@ def register_middleware(application: FastAPI, settings: Settings) -> None:
         )
         observe("http_request_duration", time.perf_counter() - started, {"route": route_label})
         response.headers["X-Request-Id"] = request_id
+        for header, value in (getattr(request.state, "rate_limit_headers", None) or {}).items():
+            response.headers.setdefault(header, value)
         response.headers.setdefault("Cache-Control", "no-store")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")

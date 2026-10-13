@@ -65,6 +65,25 @@ _COMMON_PASSWORDS: Final = frozenset(
         "correcthorsebatterystaple",
     }
 )
+#: Common words that make a password weak *wherever* they appear, not only on their own:
+#: "passwordpasswordpassword" and "MySecret123!" are both still breach-corpus passwords.
+_COMMON_SUBSTRINGS: Final = (
+    "password",
+    "passw0rd",
+    "123456",
+    "12345678",
+    "qwerty",
+    "letmein",
+    "welcome",
+    "iloveyou",
+    "monkey",
+    "dragon",
+    "changeme",
+    "administrator",
+    "armxai",
+    "trustno1",
+)
+
 _REPEATED_CHAR: Final = re.compile(r"(.)\1{3,}")
 _SEQUENTIAL: Final = ("0123456789", "abcdefghijklmnopqrstuvwxyz", "qwertyuiop")
 
@@ -234,7 +253,7 @@ def password_policy_error(
     if len(password) > 256:
         return "Password must be at most 256 characters"
     lowered = password.lower()
-    if lowered in _COMMON_PASSWORDS:
+    if lowered in _COMMON_PASSWORDS or any(word in lowered for word in _COMMON_SUBSTRINGS):
         return "Password is too common"
     if email:
         local, _, domain = email.lower().partition("@")
