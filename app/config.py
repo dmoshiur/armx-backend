@@ -618,10 +618,12 @@ class Settings(BaseSettings):
                 "search": self.search_enabled,
                 "mail_read": self.mail_enabled,
                 "messaging": self.messaging_enabled,
-                "image_provider": self.image_provider,
+                "image_edit": self.image_provider != "none",
                 "web_builder": self.web_builder_enabled,
                 "google_oauth": self.google_oauth_enabled,
             },
+            # Not an on/off switch: which image backend is configured ("none", a local model, ...).
+            "image_provider": self.image_provider,
             "secrets_generated_for_dev": {
                 "jwt_secret_key": self.jwt_secret_was_generated,
                 "encryption_key": self.encryption_key_was_generated,

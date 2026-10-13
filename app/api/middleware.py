@@ -25,7 +25,7 @@ from typing import Final
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import RequestResponseEndpoint
 
 from app.config import Settings
@@ -125,7 +125,7 @@ def register_middleware(application: FastAPI, settings: Settings) -> None:
 
         content_length = request.headers.get("content-length")
         if content_length and content_length.isdigit() and int(content_length) > _MAX_BODY_BYTES:
-            response: Response = ORJSONResponse(
+            response: Response = JSONResponse(
                 status_code=413,
                 content={
                     "code": ErrorCode.PAYLOAD_TOO_LARGE,
@@ -144,7 +144,7 @@ def register_middleware(application: FastAPI, settings: Settings) -> None:
             if not settings.demo_insecure and scheme != "https" and not exempt:
                 # The TLS connection is terminated by nginx or the platform edge; reaching
                 # this branch means the client really did speak plaintext.
-                response = ORJSONResponse(
+                response = JSONResponse(
                     status_code=400,
                     content={
                         "code": ErrorCode.TLS_REQUIRED,

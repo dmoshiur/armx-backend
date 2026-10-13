@@ -30,9 +30,12 @@ from app.core.errors import APIError, ErrorCode
 from app.core.logging import configure_logging, get_logger
 from app.core.time import utcnow
 from app.db.bootstrap import initialize_database_state
-from app.db.session import dispose_engines
+from app.db.session import dispose_engines, get_sessionmaker
 from app.db.urls import redacted_database_url
+from app.llm.base import LLMProvider
+from app.registry.core import ToolRegistry
 from app.registry.discovery import discover_tools
+from app.registry.store import sync_registry
 
 logger = get_logger("main")
 
@@ -111,12 +114,19 @@ def _install_error_handlers(application: FastAPI) -> None:
         )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    registry: ToolRegistry | None = None,
+    llm_provider: LLMProvider | None = None,
+) -> FastAPI:
     """
     Build the ASGI application.
 
-    Accepts an explicit ``Settings`` so tests can construct an isolated app (separate
-    database file, mock LLM, rate limits on) without touching process environment variables.
+    Accepts an explicit ``Settings`` so tests can construct an isolated app (separate database
+    file, mock LLM, rate limits on) without touching process environment variables. ``registry``
+    and ``llm_provider`` override the discovered tool set and the model provider, which is how
+    the test suite pins a scripted model and a known catalogue without mutating process state.
     """
     configured = settings or get_settings()
 
@@ -144,11 +154,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
         # 1. Registry first: the tool manifests are the allowlist every later step uses.
-        registry = discover_tools(configured)
-        logger.info("tool registry: %d tools registered", len(registry))
+        tools = registry if registry is not None else discover_tools(configured)
+        logger.info("tool registry: %d tools registered", len(tools))
 
         # 2. Then database state (flags, cleanup, migration revision).
         await initialize_database_state(configured)
+
+        # 3. Mirror the registry into the database: the tool rows are what an operator toggles,
+        #    and the snapshot they belong to is what every audit row references.
+        try:
+            factory = await get_sessionmaker(configured)
+            async with factory() as session:
+                await sync_registry(session, tools)
+                await session.commit()
+        except Exception:
+            # A degraded catalogue must not stop the API serving: /health and the admin console
+            # stay reachable, and the next restart (or the maintenance loop) retries the sync.
+            logger.exception("registry sync failed; the tool catalogue is stale")
 
         stop = asyncio.Event()
         tasks: list[asyncio.Task[None]] = []
@@ -171,7 +193,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.info("worker loop delegated to the dedicated worker container")
 
         application.state.settings = configured
-        application.state.registry = registry
+        application.state.registry = tools
+        if llm_provider is not None:
+            application.state.llm_provider = llm_provider
 
         try:
             yield
@@ -181,6 +205,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            provider = getattr(application.state, "llm_provider", None)
+            if provider is not None:
+                await provider.aclose()
             await dispose_engines()
             logger.info("shutdown complete")
 
@@ -242,8 +269,10 @@ def _include_approvals(application: FastAPI) -> None:
 
 def _include_assistant(application: FastAPI) -> None:
     from app.assistant.routes import router as assistant_router
+    from app.assistant.ws import router as assistant_stream_router
 
     application.include_router(assistant_router)
+    application.include_router(assistant_stream_router)
 
 
 def _include_tools(application: FastAPI) -> None:
@@ -312,6 +341,11 @@ def _include_web_builder(application: FastAPI) -> None:
 _FEATURE_ROUTERS: tuple[Callable[[FastAPI], None], ...] = (
     _include_auth,
     _include_users,
+    _include_tools,
+    _include_approvals,
+    _include_audit,
+    _include_admin,
+    _include_assistant,
 )
 
 

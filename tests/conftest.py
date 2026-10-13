@@ -135,6 +135,26 @@ async def client(app) -> AsyncIterator[AsyncClient]:
             yield http
 
 
+@pytest.fixture
+def client_for():
+    """
+    Run a *custom* application (extra tools, scripted model) through its lifespan.
+
+    Kept separate from ``client`` so a test can build an app whose tool catalogue and model
+    provider it controls, without mutating the process-wide registry or provider.
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def build(application):
+        async with application.router.lifespan_context(application):
+            transport = ASGITransport(app=application)
+            async with AsyncClient(transport=transport, base_url="http://testserver") as http:
+                yield http
+
+    return build
+
+
 # --------------------------------------------------------------------- factories
 @pytest_asyncio.fixture
 async def user_factory(db: AsyncSession):

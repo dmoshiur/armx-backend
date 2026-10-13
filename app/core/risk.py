@@ -3,10 +3,17 @@
 """
 Risk tiers.
 
-The tier is *always* decided server-side from the registered tool manifest. It is
-never taken from the client, never taken from the model, and never mutated by tool
-output. HIGH and MEDIUM actions additionally require a fresh, exact-action approval
-(see ``app/security/approvals.py``).
+The tier is *always* decided server-side from the registered tool manifest. It is never taken
+from the client, never taken from the model, and never mutated by tool output.
+
+Policy (enforced by :mod:`app.security.gateway`):
+
+============================  ==========================================================
+LOW                           executes, rate limited, audited
+MEDIUM                        executes unless the manifest declares ``confirm=True``, in
+                              which case one fresh approval is required per action
+HIGH                          always requires a fresh, hash-bound, single-use approval
+============================  ==========================================================
 """
 
 from __future__ import annotations
@@ -25,7 +32,8 @@ class Risk(IntEnum):
 
     @property
     def label(self) -> str:
-        return self.name
+        """Lowercase name: the API, the audit trail and approval prompts all use this form."""
+        return self.name.lower()
 
     @classmethod
     def parse(cls, value: Risk | int | str) -> Risk:
@@ -43,9 +51,16 @@ class Risk(IntEnum):
 RISK_ORDER: tuple[Risk, ...] = (Risk.LOW, Risk.MEDIUM, Risk.HIGH)
 
 
-def requires_approval(risk: Risk) -> bool:
-    """MEDIUM and HIGH actions always need a fresh approval; LOW does not."""
-    return risk >= Risk.MEDIUM
+def requires_approval(risk: Risk, *, confirm: bool = False) -> bool:
+    """
+    Whether this tier needs a fresh approval.
+
+    HIGH always does - no configuration, no override. MEDIUM does only when the manifest says
+    so, which is how drafts and previews stay frictionless while a real send or publish does not.
+    """
+    if risk is Risk.HIGH:
+        return True
+    return risk is Risk.MEDIUM and confirm
 
 
 def risk_from_name(name: str) -> Risk:

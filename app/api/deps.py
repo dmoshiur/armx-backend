@@ -13,15 +13,29 @@ isolated database and mock LLM sees those settings reflected in every endpoint, 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
-from fastapi import Request
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db.session import get_sessionmaker
+from app.llm.base import LLMProvider
+from app.llm.factory import build_provider
 from app.registry.core import ToolRegistry, registry
+from app.security.gateway import ActorRef, SecurityGateway
 
-__all__ = ["app_registry", "app_settings", "db_session"]
+if TYPE_CHECKING:  # pragma: no cover - typing only; avoids an import cycle with app.auth.deps
+    from app.auth.dependencies import Principal
+
+__all__ = [
+    "actor_for",
+    "app_gateway",
+    "app_llm",
+    "app_registry",
+    "app_settings",
+    "db_session",
+]
 
 
 def app_settings(request: Request) -> Settings:
@@ -38,6 +52,44 @@ def app_registry(request: Request) -> ToolRegistry:
     if isinstance(discovered, ToolRegistry):
         return discovered
     return registry
+
+
+def app_gateway(
+    settings: Settings = Depends(app_settings),
+    tools: ToolRegistry = Depends(app_registry),
+) -> SecurityGateway:
+    """The Security Gateway for this application, bound to the discovered registry."""
+    return SecurityGateway(settings, tools)
+
+
+def app_llm(
+    request: Request,
+    settings: Settings = Depends(app_settings),
+) -> LLMProvider:
+    """
+    The configured model provider, created once per application.
+
+    Built lazily and cached on the application state: constructing it per request would open an
+    HTTP client (and a TLS handshake) for every message. A test can override the provider by
+    setting ``app.state.llm_provider`` before the first call, which is how the harness tests pin
+    a scripted model without touching the network.
+    """
+    existing = getattr(request.app.state, "llm_provider", None)
+    if existing is not None:
+        return existing
+    provider = build_provider(settings)
+    request.app.state.llm_provider = provider
+    return provider
+
+
+def actor_for(principal: Principal) -> ActorRef:
+    """Translate an authenticated principal into the gateway's view of the caller."""
+    return ActorRef(
+        user_id=principal.user_id,
+        role=principal.role,
+        scopes=principal.scopes,
+        label=principal.user.display_name or principal.user.email,
+    )
 
 
 async def db_session(request: Request) -> AsyncIterator[AsyncSession]:

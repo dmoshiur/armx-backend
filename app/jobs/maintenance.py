@@ -23,19 +23,20 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Final
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.core.alerts import AlertSeverity, send_alert
-from app.core.enums import ApprovalStatus, AuditOutcome, AuditSource, JobStatus
+from app.core.enums import JobStatus
 from app.core.logging import get_logger
 from app.core.metrics import inc, set_gauge
 from app.core.time import utcnow
 from app.db.bootstrap import purge_expired_rows
-from app.db.models import Approval, AuditEvent, ImageAsset, Job, MailOutboxMessage, MemoryItem
+from app.db.models import AuditEvent, ImageAsset, Job, MailOutboxMessage, MemoryItem
 from app.db.session import session_scope
 from app.db.sql import affected_rows
+from app.security.approvals import expire_stale
 
 __all__ = ["maintenance_loop", "run_maintenance_once"]
 
@@ -48,46 +49,8 @@ _EXPIRING_APPROVAL_BATCH: Final = 500
 
 
 async def _expire_approvals(session: AsyncSession) -> int:
-    """Flip stale pending approvals to expired and audit each one."""
-    now = utcnow()
-    stale = (
-        (
-            await session.execute(
-                select(Approval)
-                .where(Approval.status == ApprovalStatus.PENDING, Approval.expires_at < now)
-                .limit(_EXPIRING_APPROVAL_BATCH)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for approval in stale:
-        approval.status = ApprovalStatus.EXPIRED
-        approval.decided_at = now
-        approval.deny_reason = "expired before a decision"
-        session.add(
-            AuditEvent(
-                occurred_at=now,
-                actor_user_id=approval.actor_user_id,
-                device_id=approval.device_id,
-                session_id=approval.session_id,
-                tool_name=approval.tool_name,
-                tool_version=approval.tool_version,
-                risk=approval.risk,
-                source=AuditSource.SYSTEM,
-                dry_run=False,
-                arguments_hash=approval.arguments_hash,
-                arguments_redacted=approval.arguments_redacted,
-                outcome=AuditOutcome.CANCELLED,
-                error_code="approval_expired",
-                result_summary="approval expired without a decision",
-                trace_id=approval.trace_id,
-                approval_id=approval.id,
-                registry_snapshot_id=approval.registry_snapshot_id,
-            )
-        )
-    await session.flush()
-    return len(stale)
+    """Flip stale approvals to expired and audit each one (implemented in the security module)."""
+    return await expire_stale(session, limit=_EXPIRING_APPROVAL_BATCH)
 
 
 async def _requeue_abandoned_jobs(session: AsyncSession, settings: Settings) -> int:
