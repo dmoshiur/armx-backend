@@ -1,0 +1,30 @@
+# Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
+#
+# Topic ACLs. The topic layout is fixed by the backend:
+#
+#   armx/{site}/{device}/cmd     backend -> device (subscribe-only for the device)
+#   armx/{site}/{device}/state   device  -> backend (publish-only for the device)
+#   armx/{site}/{device}/event   device  -> backend, one-shot notifications
+#
+# The LLM never chooses a topic: tools resolve a device through the allowlisted linked-device
+# record and the backend builds the topic from that record.
+
+# The API/worker identity: everything under the deployment's site prefix.
+user armx-api
+topic readwrite armx/#
+
+# A relay node may publish only its own state/events and read only its own command topic.
+# Add one block per provisioned device; replace {site}/{device} with the real values.
+user esp32-livingroom
+topic write armx/home/livingroom/state
+topic write armx/home/livingroom/event
+topic read  armx/home/livingroom/cmd
+
+user esp32-bedroom
+topic write armx/home/bedroom/state
+topic write armx/home/bedroom/event
+topic read  armx/home/bedroom/cmd
+
+# Home Assistant bridges the same entities; it is treated as a broker client, not a device.
+user home-assistant
+topic readwrite armx/#

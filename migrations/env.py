@@ -1,81 +1,97 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
+"""Alembic environment. Reads DATABASE_URL from the validated settings object."""
+
+from __future__ import annotations
+
 import asyncio
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import create_async_engine
 
+# Importing the models module registers every table on Base.metadata.
+import app.db.models  # noqa: F401  (imported for its side effect)
 from app.config import get_settings
-from app.db import models  # noqa: F401 - registers model metadata for Alembic.
 from app.db.base import Base
-from app.db.engine import create_database_engine
-from app.db.urls import DatabaseBackend, database_backend
+from app.db.urls import async_database_url, sync_database_url
 
 config = context.config
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
-
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-_is_sqlite_family = database_backend(settings.database_url) in {
-    DatabaseBackend.AIOSQLITE,
-    DatabaseBackend.LIBSQL,
-}
+
+
+def render_item(type_: object, obj: object, autogen_context: object) -> str | bool:
+    """
+    Render the application's TypeDecorators as their underlying SQL types.
+
+    Without this, autogenerate would emit ``app.db.base.UtcDateTime()`` in a migration, coupling
+    every historical revision to the current application code. The underlying types
+    (``VARCHAR(n)``, ``TIMESTAMP WITH TIME ZONE``) are what the database actually stores.
+    """
+    name = type(type_).__name__
+    if name == "UtcDateTime":
+        return "sa.DateTime(timezone=True)"
+    if name == "EnumStr":
+        length = getattr(type_, "length", 32)
+        return f"sa.String(length={length})"
+    return False
+
+
+# SQLite requires batch mode for any future ALTER that adds or drops a constraint.
+_RENDER_AS_BATCH = True
+
+
+def _database_url() -> str:
+    return async_database_url(get_settings().database_url)
 
 
 def run_migrations_offline() -> None:
-    """Run migrations without creating an Engine."""
-
+    """Emit SQL to stdout without connecting (``alembic upgrade head --sql``)."""
     context.configure(
-        url=settings.database_url,
+        url=sync_database_url(get_settings().database_url),
         target_metadata=target_metadata,
         literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
         compare_type=True,
-        # SQLite/libSQL do not support most ALTER TABLE forms; batch mode rewrites tables.
-        render_as_batch=_is_sqlite_family,
+        compare_server_default=True,
+        render_as_batch=_RENDER_AS_BATCH,
+        render_item=render_item,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
-def do_run_migrations(connection: Connection) -> None:
+def do_run_migrations(connection: object) -> None:
     context.configure(
-        connection=connection,
+        connection=connection,  # type: ignore[arg-type]
         target_metadata=target_metadata,
         compare_type=True,
-        render_as_batch=_is_sqlite_family,
+        compare_server_default=True,
+        render_as_batch=_RENDER_AS_BATCH,
+        render_item=render_item,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
-async def run_migrations_online() -> None:
-    """Run migrations through the application's asynchronous engine factory."""
-
-    connectable = create_database_engine(
-        settings.database_url,
-        echo=settings.database_echo,
-        pool_pre_ping=settings.database_pool_pre_ping,
-        auth_token=(
-            settings.turso_auth_token.get_secret_value()
-            if settings.turso_auth_token is not None
-            else None
-        ),
-        timeout_seconds=settings.database_timeout_seconds,
-        poolclass=pool.NullPool,
-    )
+async def run_async_migrations() -> None:
+    engine = create_async_engine(_database_url(), poolclass=pool.NullPool, future=True)
     try:
-        async with connectable.connect() as connection:
+        async with engine.connect() as connection:
             await connection.run_sync(do_run_migrations)
     finally:
-        await connectable.dispose()
+        await engine.dispose()
+
+
+def run_migrations_online() -> None:
+    asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    asyncio.run(run_migrations_online())
+    run_migrations_online()

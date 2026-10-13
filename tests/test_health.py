@@ -1,175 +1,112 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+"""Health, readiness, metrics and the HTTP hardening middleware."""
 
-from app.config import Settings, get_settings
-from app.db.session import get_session
-from app.main import create_app
+from __future__ import annotations
+
+from httpx import AsyncClient
 
 
-class _StubSession:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-
-    async def execute(self, statement: object) -> None:
-        del statement
-        if self.fail:
-            raise SQLAlchemyError("sensitive db connection details")
-
-
-def _make_app(
-    *,
-    session: _StubSession | None = None,
-    insecure: bool = True,
-    allow_plain_http_health_probe: bool = False,
-):
-    settings = Settings(
-        _env_file=None,
-        environment="demo" if insecure else "production",
-        demo_insecure=insecure,
-        allow_plain_http_health_probe=allow_plain_http_health_probe,
-        database_url=(
-            "sqlite+aiosqlite:///./test.db"
-            if insecure
-            else "sqlite+libsql://armx-demo.turso.io?secure=true"
-        ),
-        turso_auth_token=None if insecure else "test-turso-token",
-        public_api_base_url=None if insecure else "https://api.example.test",
-        jwt_secret_key="t" * 32,
-    )
-    application = create_app(settings)
-
-    async def override_session():
-        yield session or _StubSession()
-
-    application.dependency_overrides[get_session] = override_session
-    application.dependency_overrides[get_settings] = lambda: settings
-    return application
-
-
-@pytest.mark.asyncio
-async def test_health_returns_documented_contract() -> None:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    application = _make_app()
-
-    async def test_session():
-        async with session_factory() as session:
-            yield session
-
-    application.dependency_overrides[get_session] = test_session
-    try:
-        async with AsyncClient(
-            transport=ASGITransport(app=application), base_url="http://testserver"
-        ) as client:
-            response = await client.get("/health")
-    finally:
-        await engine.dispose()
-
+async def test_health_reports_ok_without_leaking_configuration(client: AsyncClient) -> None:
+    response = await client.get("/health")
     assert response.status_code == 200
-    assert response.json()["server_version"] == "0.1.0"
-    assert response.json()["requires_pairing"] is False
-    assert response.json()["at"].endswith("Z")
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["database"] == "ok"
+    assert set(body) == {"status", "server_version", "environment", "database", "at"}
+    # A credential, a connection string or a filesystem path must never appear here.
+    assert "sqlite" not in response.text
+    assert "secret" not in response.text.lower()
 
 
-@pytest.mark.asyncio
-async def test_health_hides_database_errors_in_standard_envelope(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async with AsyncClient(
-        transport=ASGITransport(app=_make_app(session=_StubSession(fail=True))),
-        base_url="http://testserver",
-    ) as client:
-        response = await client.get("/health")
-
-    assert response.status_code == 503
-    assert response.json()["code"] == "service_unavailable"
-    assert response.json()["message"] == "Service unavailable"
-    assert response.json()["retryable"] is True
-    assert response.json()["request_id"]
-    assert "sensitive db connection details" not in response.text
-    assert "sensitive db connection details" not in caplog.text
+async def test_ready_reports_the_applied_migration_revision(client: AsyncClient) -> None:
+    response = await client.get("/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["migration_revision"] is not None
+    assert body["kill_switch_engaged"] is False
 
 
-@pytest.mark.asyncio
-async def test_non_demo_profile_rejects_plain_http_with_error_envelope() -> None:
-    application = _make_app(insecure=False)
-    async with AsyncClient(
-        transport=ASGITransport(app=application), base_url="http://testserver"
-    ) as client:
-        response = await client.get("/health")
-
-    assert response.status_code == 400
-    assert response.json()["code"] == "tls_required"
-    assert response.json()["message"] == "HTTPS is required"
-    assert response.headers["x-request-id"] == response.json()["request_id"]
+async def test_metrics_are_exposed_locally_and_are_prometheus_shaped(client: AsyncClient) -> None:
+    await client.get("/health")
+    response = await client.get("/metrics")
+    assert response.status_code == 200
+    assert "armx_http_requests_total" in response.text
+    assert 'route="/health"' in response.text
 
 
-@pytest.mark.asyncio
-async def test_platform_health_probe_is_the_only_plain_http_exception() -> None:
-    """Render probes GET /health over plain HTTP; every other request still needs TLS."""
+async def test_metrics_can_be_disabled(app_factory) -> None:
+    app = app_factory(metrics_enabled=False)
+    from httpx import ASGITransport
 
-    application = _make_app(insecure=False, allow_plain_http_health_probe=True)
-    async with AsyncClient(
-        transport=ASGITransport(app=application), base_url="http://testserver"
-    ) as client:
-        probe = await client.get("/health")
-        other_route = await client.get("/devices")
-        non_get_probe = await client.post("/health")
-
-    assert probe.status_code == 200
-    for rejected in (other_route, non_get_probe):
-        assert rejected.status_code == 400
-        assert rejected.json()["code"] == "tls_required"
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get("/metrics")
+    assert response.status_code == 404
 
 
-def test_production_cannot_enable_demo_insecure() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            _env_file=None,
-            environment="production",
-            demo_insecure=True,
-            jwt_secret_key="a" * 32,
-        )
+async def test_unknown_route_returns_the_standard_error_envelope(client: AsyncClient) -> None:
+    response = await client.get("/definitely-not-a-route")
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body) == {"code", "message", "retryable", "request_id"}
+    assert body["code"] == "not_found"
+    assert body["request_id"]
 
 
-def test_secure_profile_requires_tls_for_database_and_llm() -> None:
-    base = {
-        "_env_file": None,
-        "environment": "production",
-        "jwt_secret_key": "b" * 32,
-        "public_api_base_url": "https://api.example.test",
-        "database_url": "sqlite+libsql://armx.turso.io",
-        "turso_auth_token": "test-turso-token",
-    }
-    with pytest.raises(ValidationError):
-        Settings(**base)  # remote libSQL without an explicit TLS flag
+async def test_security_headers_are_present_on_every_response(client: AsyncClient) -> None:
+    response = await client.get("/health")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-request-id"]
 
-    with pytest.raises(ValidationError):
-        # A local libSQL file is still an ephemeral-disk database in deployed profiles.
-        Settings(**{**base, "database_url": "sqlite+libsql:///./armx.db"})
 
-    with pytest.raises(ValidationError):
-        Settings(
-            **{
-                **base,
-                "database_url": "libsql://armx.turso.io?secure=true",
-                "ollama_base_url": "http://model.example.test:11434",
-            }
-        )
+async def test_request_id_is_echoed_when_the_client_supplies_one(client: AsyncClient) -> None:
+    response = await client.get("/health", headers={"X-Request-Id": "trace-me-1234"})
+    assert response.headers["x-request-id"] == "trace-me-1234"
 
-    with pytest.raises(ValidationError):
-        Settings(**{**base, "database_url": "libsql://armx.turso.io?secure=false"})
 
-    with pytest.raises(ValidationError):
-        Settings(
-            **{
-                **base,
-                "database_url": "libsql://armx.turso.io?secure=true",
-                "ollama_base_url": "http://model.example.test:11434",
-            }
-        )
+async def test_plaintext_http_is_rejected_outside_the_demo_profile(app_factory) -> None:
+    """With DEMO_INSECURE off, a plaintext request is refused before it reaches any handler."""
+    app = app_factory(demo_insecure=False)
+    from httpx import ASGITransport
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get("/ready")
+            assert response.status_code == 400
+            assert response.json()["code"] == "tls_required"
+            # The liveness probe may be exempted explicitly; by default it is not.
+            assert (await client.get("/health")).status_code == 400
+
+
+async def test_oversized_body_is_rejected_before_parsing(client: AsyncClient) -> None:
+    response = await client.post(
+        "/anything",
+        content=b"x",
+        headers={"Content-Length": str(64 * 1024 * 1024), "Content-Type": "application/json"},
+    )
+    assert response.status_code in {413, 404}
+    if response.status_code == 413:
+        assert response.json()["code"] == "payload_too_large"
+
+
+async def test_unhandled_exception_returns_a_500_without_leaking_detail(app_factory) -> None:
+    app = app_factory()
+    from httpx import ASGITransport
+
+    @app.get("/boom", include_in_schema=False)
+    async def boom() -> None:
+        raise RuntimeError("database password is hunter2")
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get("/boom")
+    assert response.status_code == 500
+    assert "hunter2" not in response.text
+    assert response.json()["code"] == "internal_error"

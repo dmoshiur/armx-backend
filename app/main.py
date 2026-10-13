@@ -1,245 +1,315 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-import asyncio
-import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime
-from uuid import uuid4
+"""
+A.R.M.X AI backend entrypoint.
 
-from fastapi import Depends, FastAPI, Request
+The LLM is an untrusted planner in this system: it can *ask* for a named tool with
+arguments, and nothing else. Everything that decides whether an action happens - risk tier,
+scopes, rate limits, approvals, the kill-switch - lives behind the Security Gateway
+(``app/security``). This module wires the HTTP surface and the process lifecycle; it makes no
+authorization decisions of its own.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.activity.routes import router as rules_router
-from app.admin.routes import router as admin_router
-from app.audit.routes import router as audit_router
-from app.auth.routes import router as auth_router
+from app import __version__
+from app.api.middleware import register_middleware
+from app.api.routes_health import router as health_router
 from app.config import Settings, get_settings
-from app.core.errors import APIError
+from app.core.alerts import AlertSeverity, send_alert
+from app.core.errors import APIError, ErrorCode
+from app.core.logging import configure_logging, get_logger
+from app.core.time import utcnow
 from app.db.bootstrap import initialize_database_state
-from app.db.session import dispose_engine, get_session
-from app.devices.routes import router as devices_router
-from app.devices.state_listener import mark_stale_devices_offline, mqtt_state_listener
-from app.intercom.routes import router as intercom_router
-from app.pairing.routes import router as pairing_router
-from app.unlock.routes import router as unlock_router
-from app.ws.routes import router as websocket_router
+from app.db.session import dispose_engines
+from app.db.urls import redacted_database_url
+from app.registry.discovery import discover_tools
 
-logger = logging.getLogger("armx")
-_SERVER_VERSION = "0.1.0"
+logger = get_logger("main")
 
 
-class HealthResponse(BaseModel):
-    server_version: str
-    requires_pairing: bool
-    at: datetime
+def _install_error_handlers(application: FastAPI) -> None:
+    """Uniform error envelope: ``{code, message, retryable, request_id}``."""
 
-
-def _request_id(request: Request) -> str:
-    value = getattr(request.state, "request_id", None)
-    if not isinstance(value, str):
-        value = uuid4().hex[:16]
-        request.state.request_id = value
-    return value
-
-
-def _error_body(request: Request, code: str, message: str, retryable: bool) -> dict[str, object]:
-    return {
-        "code": code,
-        "message": message,
-        "retryable": retryable,
-        "request_id": _request_id(request),
-    }
-
-
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build the ASGI app, allowing isolated environment-backed settings in tests."""
-
-    configured = settings or get_settings()
-    stop_background = asyncio.Event()
-    background_tasks: list[asyncio.Task[None]] = []
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        llm_models = {
-            "groq": configured.groq_model,
-            "ashna": configured.ashna_model,
-            "ollama": configured.ollama_model,
-            "openai_compatible": configured.openai_compatible_model or "(unset)",
+    def body(request: Request, code: str, message: str, retryable: bool) -> dict[str, object]:
+        request_id = getattr(request.state, "request_id", None)
+        return {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "request_id": request_id or "",
         }
-        logger.info(
-            "Chat provider active: provider=%s model=%s",
-            configured.llm_provider,
-            llm_models[configured.llm_provider],
-        )
-        if configured.demo_insecure:
-            logger.warning(
-                "DEMO_INSECURE=true: HTTP is unencrypted; use only on a local/demo network."
-            )
-        if configured.pairing_auto_approve:
-            logger.warning(
-                "PAIRING_AUTO_APPROVE=true: new Ed25519 device pairings will be approved "
-                "automatically once the client signs the challenge."
-            )
-        if configured.jwt_secret_was_generated:
-            logger.warning(
-                "JWT_SECRET_KEY was not supplied; sessions and encrypted pairing credentials "
-                "will not survive a process restart. Set a persistent secret."
-            )
-        await initialize_database_state(configured)
-        stop_background.clear()
-        background_tasks.append(asyncio.create_task(mark_stale_devices_offline(stop_background)))
-        if configured.mqtt_enabled:
-            background_tasks.append(
-                asyncio.create_task(mqtt_state_listener(configured, stop_background))
-            )
-        try:
-            yield
-        finally:
-            stop_background.set()
-            for task in background_tasks:
-                task.cancel()
-            if background_tasks:
-                await asyncio.gather(*background_tasks, return_exceptions=True)
-            background_tasks.clear()
-            await dispose_engine()
-
-    application = FastAPI(
-        title=configured.app_name,
-        version=_SERVER_VERSION,
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-        lifespan=lifespan,
-    )
-
-    @application.middleware("http")
-    async def enforce_tls_and_request_id(request: Request, call_next):  # type: ignore[no-untyped-def]
-        request.state.request_id = uuid4().hex[:16]
-        is_secure = request.url.scheme.lower() == "https"
-        # The platform load balancer terminates TLS and forwards over plain HTTP; uvicorn is
-        # started with ``--proxy-headers --forwarded-allow-ips`` for exactly that hop, so an
-        # https scheme here means "the client used HTTPS".  The one documented exception is
-        # the platform's own liveness probe, which hits GET /health on the private network
-        # without a forwarding header.  Public HTTP is redirected to HTTPS at the platform
-        # edge before it reaches this service; the probe path returns no user data and needs
-        # no credentials, so it can be answered over the internal hop when the operator opts
-        # in with ALLOW_PLAIN_HTTP_HEALTH_PROBE=true.  Every other request still requires
-        # TLS outside the demo profile.
-        is_liveness_probe = (
-            configured.allow_plain_http_health_probe
-            and request.method == "GET"
-            and request.url.path == "/health"
-        )
-        if not configured.demo_insecure and not is_secure and not is_liveness_probe:
-            response = JSONResponse(
-                status_code=400,
-                content=_error_body(request, "tls_required", "HTTPS is required", False),
-            )
-        else:
-            response = await call_next(request)
-        response.headers["X-Request-Id"] = _request_id(request)
-        response.headers["Cache-Control"] = response.headers.get("Cache-Control", "no-store")
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        return response
-
-    if configured.cors_origin_list:
-        # Browser origins are opt-in and explicit (Flutter web/desktop builds). Native
-        # mobile clients are unaffected. Added last so it is the outermost middleware and
-        # preflight requests are answered before the TLS check above.
-        application.add_middleware(
-            CORSMiddleware,
-            allow_origins=configured.cors_origin_list,
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-            allow_headers=[
-                "Authorization",
-                "Content-Type",
-                "X-Armx-Device-Key",
-                "X-Request-Id",
-            ],
-        )
 
     @application.exception_handler(APIError)
     async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
-            content=_error_body(request, exc.code, exc.message, exc.retryable),
+            content={
+                **body(request, exc.code, exc.message, exc.retryable),
+                **({"details": exc.details} if exc.details else {}),
+            },
+            headers=exc.headers,
         )
 
     @application.exception_handler(RequestValidationError)
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        del exc
+        # Field names are echoed, values are not: a rejected password must never be logged.
+        fields = sorted({str(error.get("loc", ("",))[-1]) for error in exc.errors()})
         return JSONResponse(
             status_code=422,
-            content=_error_body(request, "invalid_request", "Request validation failed", False),
+            content={
+                **body(request, ErrorCode.INVALID_REQUEST, "Request validation failed", False),
+                "details": {"fields": fields[:20]},
+            },
         )
 
     @application.exception_handler(StarletteHTTPException)
     async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        code, message = (
-            ("not_found", "Resource was not found")
-            if exc.status_code == 404
-            else (
-                "http_error",
-                "Request could not be completed",
-            )
-        )
+        if exc.status_code == 404:
+            code, message = ErrorCode.NOT_FOUND, "Resource was not found"
+        elif exc.status_code == 405:
+            code, message = "method_not_allowed", "Method not allowed"
+        else:
+            code, message = "http_error", "Request could not be completed"
         return JSONResponse(
             status_code=exc.status_code,
-            content=_error_body(request, code, message, exc.status_code >= 500),
+            content=body(request, code, message, exc.status_code >= 500),
+            headers=getattr(exc, "headers", None) or {},
         )
 
     @application.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
-        request_id = _request_id(request)
-        # Keep production logs useful for correlating failures without logging the
-        # exception text, which may contain SQL values or other user supplied data.
+        request_id = getattr(request.state, "request_id", "")
+        # Log the type, never the message: SQL values and user input can end up in
+        # exception text, and this log line is the one that fires when something is wrong.
         logger.error(
-            "Unhandled API error request_id=%s exception_type=%s",
+            "unhandled error request_id=%s exception_type=%s path=%s",
             request_id,
             type(exc).__name__,
+            request.url.path,
         )
+        if type(exc).__name__ in {"OperationalError", "InterfaceError", "DBAPIError"}:
+            send_alert(
+                "Database error in request path",
+                severity=AlertSeverity.CRITICAL,
+                detail={"exception": type(exc).__name__, "request_id": request_id},
+            )
         return JSONResponse(
             status_code=500,
-            content=_error_body(request, "internal_error", "An internal error occurred", True),
+            content=body(request, ErrorCode.INTERNAL_ERROR, "An internal error occurred", True),
         )
 
-    @application.get("/health", response_model=HealthResponse, tags=["health"])
-    async def health(session: AsyncSession = Depends(get_session)) -> HealthResponse:
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """
+    Build the ASGI application.
+
+    Accepts an explicit ``Settings`` so tests can construct an isolated app (separate
+    database file, mock LLM, rate limits on) without touching process environment variables.
+    """
+    configured = settings or get_settings()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        configure_logging(level=configured.log_level, fmt=configured.log_format)
+        logger.info("starting %s v%s", configured.app_name, __version__)
+        logger.info("configuration: %s", configured.safe_summary())
+        logger.info("database: %s", redacted_database_url(configured.database_url))
+
+        if configured.demo_insecure:
+            logger.warning(
+                "DEMO_INSECURE=true: plaintext HTTP is allowed. Never use this profile on a "
+                "network you do not control."
+            )
+        if configured.jwt_secret_was_generated or configured.encryption_key_was_generated:
+            logger.warning(
+                "An ephemeral development secret was generated. Sessions and encrypted memory "
+                "will not survive a restart. Set JWT_SECRET_KEY and ENCRYPTION_KEY."
+            )
+        if configured.email_delivery_mode == "outbox":
+            logger.warning(
+                "EMAIL_DELIVERY_MODE=outbox: verification and reset mail is stored in "
+                "mail_outbox and never delivered (read it via GET /admin/mail)."
+            )
+
+        # 1. Registry first: the tool manifests are the allowlist every later step uses.
+        registry = discover_tools(configured)
+        logger.info("tool registry: %d tools registered", len(registry))
+
+        # 2. Then database state (flags, cleanup, migration revision).
+        await initialize_database_state(configured)
+
+        stop = asyncio.Event()
+        tasks: list[asyncio.Task[None]] = []
+
+        from app.jobs.maintenance import maintenance_loop
+
+        tasks.append(asyncio.create_task(maintenance_loop(configured, stop), name="maintenance"))
+
+        if configured.worker_enabled and configured.worker_in_api:
+            from app.jobs.worker import worker_loop
+
+            for index in range(max(1, configured.worker_concurrency)):
+                tasks.append(
+                    asyncio.create_task(
+                        worker_loop(configured, stop, worker_name=f"api-{index}"),
+                        name=f"worker-api-{index}",
+                    )
+                )
+        elif configured.worker_enabled:
+            logger.info("worker loop delegated to the dedicated worker container")
+
+        application.state.settings = configured
+        application.state.registry = registry
+
         try:
-            await session.execute(text("SELECT 1"))
-        except SQLAlchemyError:
-            logger.warning("health check failed: database unavailable")
-            raise APIError(
-                "service_unavailable", "Service unavailable", status_code=503, retryable=True
-            ) from None
-        return HealthResponse(
-            server_version=_SERVER_VERSION,
-            requires_pairing=False,
-            at=datetime.now(UTC),
-        )
+            yield
+        finally:
+            stop.set()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await dispose_engines()
+            logger.info("shutdown complete")
+
+    application = FastAPI(
+        title=configured.app_name,
+        version=__version__,
+        description=(
+            "Tool-driven assistant backend. The LLM proposes; the Security Gateway decides."
+        ),
+        docs_url="/docs" if configured.is_local_dev else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if configured.is_local_dev else None,
+        lifespan=lifespan,
+    )
+
+    register_middleware(application, configured)
+    _install_error_handlers(application)
+
+    @application.get("/", include_in_schema=False)
+    async def root() -> dict[str, str]:
+        return {
+            "name": configured.app_name,
+            "version": __version__,
+            "status": "ok",
+            "time": utcnow().isoformat(),
+        }
+
+    application.include_router(health_router)
+
+    for include in _FEATURE_ROUTERS:
+        include(application)
+
+    return application
+
+
+def _include_auth(application: FastAPI) -> None:
+    from app.auth.routes import router as auth_router
 
     application.include_router(auth_router)
-    application.include_router(pairing_router)
+
+
+def _include_users(application: FastAPI) -> None:
+    from app.users.routes import router as users_router
+
+    application.include_router(users_router)
+
+
+def _include_devices(application: FastAPI) -> None:
+    from app.devices.routes import router as devices_router
+
     application.include_router(devices_router)
-    application.include_router(admin_router)
+
+
+def _include_approvals(application: FastAPI) -> None:
+    from app.approvals.routes import router as approvals_router
+
+    application.include_router(approvals_router)
+
+
+def _include_assistant(application: FastAPI) -> None:
+    from app.assistant.routes import router as assistant_router
+
+    application.include_router(assistant_router)
+
+
+def _include_tools(application: FastAPI) -> None:
+    from app.tools.routes import router as tools_router
+
+    application.include_router(tools_router)
+
+
+def _include_audit(application: FastAPI) -> None:
+    from app.audit.routes import router as audit_router
+
     application.include_router(audit_router)
-    application.include_router(unlock_router)
-    application.include_router(rules_router)
-    application.include_router(intercom_router)
-    application.include_router(websocket_router)
-    return application
+
+
+def _include_admin(application: FastAPI) -> None:
+    from app.admin.routes import router as admin_router
+
+    application.include_router(admin_router)
+
+
+def _include_memory(application: FastAPI) -> None:
+    from app.memory.routes import router as memory_router
+
+    application.include_router(memory_router)
+
+
+def _include_automation(application: FastAPI) -> None:
+    from app.automation.routes import router as automation_router
+
+    application.include_router(automation_router)
+
+
+def _include_guest(application: FastAPI) -> None:
+    from app.guest.routes import router as guest_router
+
+    application.include_router(guest_router)
+
+
+def _include_messaging(application: FastAPI) -> None:
+    from app.messaging.routes import router as messaging_router
+
+    application.include_router(messaging_router)
+
+
+def _include_webhooks(application: FastAPI) -> None:
+    from app.integrations.webhooks import router as webhooks_router
+
+    application.include_router(webhooks_router)
+
+
+def _include_jobs(application: FastAPI) -> None:
+    from app.jobs.routes import router as jobs_router
+
+    application.include_router(jobs_router)
+
+
+def _include_web_builder(application: FastAPI) -> None:
+    from app.web_builder.routes import router as web_builder_router
+
+    application.include_router(web_builder_router)
+
+
+#: Feature routers are included through explicit functions rather than a dynamic scan, so the
+#: API surface is greppable and a broken module fails loudly at startup instead of silently
+#: dropping routes. Entries are appended as each build phase lands.
+_FEATURE_ROUTERS: tuple[Callable[[FastAPI], None], ...] = ()
 
 
 app = create_app()

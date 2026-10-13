@@ -1,55 +1,150 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-import logging
+"""
+Startup database preparation.
 
-from sqlalchemy import select
+Runs after ``alembic upgrade head`` and before the first request:
+
+* creates the rows the Security Gateway depends on (notably the kill-switch flag, which must
+  exist and be readable even on a brand-new database),
+* purges expired operational rows so the tables do not grow without bound,
+* reports the dialect and migration revision for the startup log.
+
+It never creates schema: Alembic owns the schema, and an application that silently creates
+tables would let an unmigrated production database boot with a schema nobody reviewed.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.db.models import SystemState, ToolToggle, User
-from app.db.session import SessionFactory
+from app.core.enums import SystemFlagKey
+from app.core.logging import get_logger
+from app.core.time import utcnow
+from app.db.models import (
+    Approval,
+    EmailToken,
+    ImageAsset,
+    RateLimitCounter,
+    Session,
+    SystemFlag,
+    UsedNonce,
+)
+from app.db.session import session_scope
+from app.db.sql import affected_rows
 
-logger = logging.getLogger("armx.bootstrap")
-_DEFAULT_TOOLS = ("GITHUB", "MAIL", "MQTT", "DB", "SYSTEM", "VISION")
+__all__ = ["initialize_database_state", "purge_expired_rows"]
+
+logger = get_logger("db.bootstrap")
+
+#: Flags that must exist before the first request. ``value`` is a string ("true"/"false")
+#: so a new flag can be added without a schema migration.
+_REQUIRED_FLAGS: tuple[tuple[SystemFlagKey, str], ...] = (
+    (SystemFlagKey.KILL_SWITCH, "false"),
+    (SystemFlagKey.MAINTENANCE_MODE, "false"),
+    (SystemFlagKey.LLM_ENABLED, "true"),
+)
 
 
-async def initialize_database_state(settings: Settings | None = None) -> None:
-    """Create system defaults while leaving a fresh account database empty."""
-
-    async with SessionFactory() as session:
-        if await session.get(SystemState, 1) is None:
-            session.add(SystemState(id=1, assistant_enabled=True, kill_switch_engaged=False))
-        for name in _DEFAULT_TOOLS:
-            if await session.get(ToolToggle, name) is None:
-                session.add(ToolToggle(name=name, enabled=False))
-
-        # A fresh database stays empty so its first successful registration can claim
-        # administrator status atomically. Existing owners are backfilled below, and
-        # credentials from legacy BOOTSTRAP_ADMIN_* variables are intentionally ignored.
-        existing_owner = await session.scalar(
-            select(User.id).where(User.roles.contains(["owner"]))
+async def _ensure_flags(session: AsyncSession) -> None:
+    existing = set((await session.execute(select(SystemFlag.key))).scalars().all())
+    now = utcnow()
+    for key, default_value in _REQUIRED_FLAGS:
+        if key in existing:
+            continue
+        session.add(
+            SystemFlag(
+                key=key,
+                value=default_value,
+                reason="created at startup",
+                updated_at=now,
+            )
         )
-        if existing_owner is None:
-            logger.warning(
-                "No administrator exists; the first registered account will receive "
-                "the initial administrator role."
+    await session.flush()
+
+
+async def purge_expired_rows(session: AsyncSession) -> dict[str, int]:
+    """
+    Delete operational rows that have expired.
+
+    Audit events and approvals are deliberately excluded: audit is retention-managed
+    separately (``AUDIT_RETENTION_DAYS``), and an expired approval is evidence of a denied
+    action, not garbage.
+    """
+    now = utcnow()
+    removed: dict[str, int] = {}
+
+    result = await session.execute(
+        delete(RateLimitCounter).where(RateLimitCounter.expires_at < now)
+    )
+    removed["rate_limit_counters"] = affected_rows(result)
+
+    result = await session.execute(delete(UsedNonce).where(UsedNonce.expires_at < now))
+    removed["used_nonces"] = affected_rows(result)
+
+    result = await session.execute(
+        delete(EmailToken).where(EmailToken.expires_at < now - timedelta(days=1))
+    )
+    removed["email_tokens"] = affected_rows(result)
+
+    result = await session.execute(
+        delete(Session).where(
+            Session.expires_at < now - timedelta(days=7), Session.revoked_at.is_not(None)
+        )
+    )
+    removed["sessions"] = affected_rows(result)
+
+    result = await session.execute(
+        delete(ImageAsset).where(ImageAsset.expires_at.is_not(None), ImageAsset.expires_at < now)
+    )
+    removed["image_assets"] = affected_rows(result)
+
+    await session.flush()
+    return removed
+
+
+async def initialize_database_state(settings: Settings) -> None:
+    """Prepare flags and reclaim expired rows. Raises if the database is unreachable."""
+    async with session_scope(settings) as session:
+        await _ensure_flags(session)
+        purged = await purge_expired_rows(session)
+        revision = await current_migration_revision(session)
+    logger.info(
+        "database state initialised",
+        extra={
+            "dialect": "postgresql" if not settings.uses_sqlite else "sqlite",
+            "revision": revision or "unknown",
+            "purged": purged,
+        },
+    )
+
+
+async def current_migration_revision(session: AsyncSession) -> str | None:
+    """Read ``alembic_version.version_num``; ``None`` when the table does not exist yet."""
+    from sqlalchemy import text
+
+    try:
+        value = (
+            await session.execute(text("SELECT version_num FROM alembic_version LIMIT 1"))
+        ).scalar()
+    except Exception:
+        return None
+    return str(value) if value else None
+
+
+async def pending_approval_count(session: AsyncSession) -> int:
+    """Gauge for ``/metrics``: approvals waiting on a human."""
+    from app.core.enums import ApprovalStatus
+
+    return int(
+        (
+            await session.execute(
+                select(func.count(Approval.id)).where(Approval.status == ApprovalStatus.PENDING)
             )
-        await session.flush()
-        system_state = await session.get(SystemState, 1)
-        if system_state is not None and system_state.first_admin_user_id is None:
-            owners = (
-                await session.scalars(select(User).order_by(User.created_at, User.id))
-            ).all()
-            owner = next(
-                (
-                    candidate
-                    for candidate in owners
-                    if {role.lower() for role in candidate.roles}.intersection(
-                        {"owner", "admin"}
-                    )
-                ),
-                None,
-            )
-            if owner is not None:
-                system_state.first_admin_user_id = owner.id
-                system_state.initial_admin_claimed = True
-        await session.commit()
+        ).scalar()
+        or 0
+    )

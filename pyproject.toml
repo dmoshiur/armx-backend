@@ -6,40 +6,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "armx-backend"
-version = "0.1.0"
-description = "A.R.M.X AI FastAPI backend"
+version = "1.0.0"
+description = "A.R.M.X AI backend - tool-driven assistant platform with a security gateway"
 readme = "README.md"
-requires-python = ">=3.12"
+# Deployment target and both CI pipelines run Python 3.12 (see Dockerfile,
+# .github/workflows/ci.yml). 3.11 is kept as the floor so contributors whose
+# distro ships an older interpreter can still run the full test suite locally.
+requires-python = ">=3.11,<3.14"
 dependencies = [
-  "fastapi>=0.115,<1",
-  "uvicorn[standard]>=0.30,<1",
-  "pydantic-settings>=2.6,<3",
-  # The asyncio DBAPI adapters in sqlalchemy.connectors.asyncio (2.1+) back the
-  # sqlite+libsql dialect in app/db/libsql_async.py.
-  "sqlalchemy[asyncio]>=2.1,<3",
-  "alembic>=1.14,<2",
-  "aiosqlite>=0.20,<1",
-  # Official Turso/libSQL client. It is synchronous; app/db/libsql_async.py wraps it.
-  "libsql>=0.1.11,<1",
-  "PyJWT[crypto]>=2.10,<3",
-  "argon2-cffi>=23.1,<26",
-  "cryptography>=44,<48",
-  "aiomqtt>=2.3,<3",
-  "httpx>=0.27,<1",
-  "python-multipart>=0.0.20,<1",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "alembic>=1.14",
+  "greenlet>=3.1",
+  "psycopg[binary,pool]>=3.2",
+  "aiosqlite>=0.20",
+  "httpx[http2]>=0.27",
+  "PyJWT[crypto]>=2.10",
+  "argon2-cffi>=23.1",
+  "cryptography>=44",
+  "aiomqtt>=2.3",
+  "python-multipart>=0.0.20",
+  "email-validator>=2.2",
+  "tenacity>=9.0",
+  "bcrypt>=4.1",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "mypy>=1.13,<2",
-  "pytest>=8.3,<9",
-  "pytest-asyncio>=0.24,<2",
-  "pytest-cov>=6,<8",
-  "ruff>=0.11,<1",
-  # Parses render.yaml in tests/test_deployment_config.py (uvicorn[standard] already ships
-  # it at runtime; declared here so a minimal dev install can run the full suite).
-  "pyyaml>=6,<7",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6",
+  "mypy>=1.13",
+  "ruff>=0.11",
+  "respx>=0.21",
+  "pyyaml>=6",
+  "pip-audit>=2.7",
 ]
+
+[project.scripts]
+armx-admin = "app.cli.create_admin:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -48,22 +56,43 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:app.*"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/cli/*", "tests/*"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
+src = ["app", "tests", "scripts"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
-ignore = ["B008"]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC", "C4", "SIM", "T20", "RUF"]
+ignore = [
+  # FastAPI's dependency-injection signature is inherently a "function call in
+  # a default argument", which this rule rejects by design.
+  "B008",
+]
 
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "S311"]
+"scripts/*" = ["T20"]
+"app/cli/*" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 plugins = ["pydantic.mypy"]
 strict = true
 warn_unused_configs = true
+warn_redundant_casts = true
+disallow_any_generics = true
 mypy_path = "."
+exclude = ["migrations/versions/"]
+
+[[tool.mypy.overrides]]
+module = ["aiomqtt.*", "argon2.*", "respx.*"]
+ignore_missing_imports = true

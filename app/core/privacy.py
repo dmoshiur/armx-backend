@@ -1,61 +1,46 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
-import re
-from typing import Any
+"""
+Data-minimisation helpers.
 
-_FORBIDDEN_KEY_COMPONENTS = {
-    "audio",
-    "audios",
-    "base64",
-    "biometric",
-    "biometrics",
-    "embedding",
-    "embeddings",
-    "face",
-    "faces",
-    "frame",
-    "frames",
-    "image",
-    "images",
-    "palm",
-    "palms",
-    "pcm",
-    "photo",
-    "photos",
-    "recording",
-    "recordings",
-    "raw",
-    "template",
-    "templates",
-    "video",
-    "videos",
-    "voice",
-    "voices",
-}
-_FORBIDDEN_VALUE = re.compile(
-    r"data:(?:image|audio)/|(?:face|voice|palm)[_-]?(?:template|embedding|geometry|"
-    r"raw[_-]?data|image|recording|print)|biometric[_-]?(?:template|embedding)",
-    re.IGNORECASE,
-)
-_BASE64_BLOB = re.compile(r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{256,}={0,2}(?![A-Za-z0-9+/_=-])")
+The backend stores identifiers, not personal data, wherever the function still works:
+client IPs are salted-hashed, emails are masked in admin listings, and memory content is
+encrypted at rest. None of this weakens an authorization decision - it only limits what a
+database dump or a log file exposes.
+"""
+
+from __future__ import annotations
+
+from app.core.crypto import hmac_hex
+
+__all__ = ["hash_ip", "mask_email", "mask_token"]
 
 
-def _key_has_prohibited_component(value: str) -> bool:
-    snake_case = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).lower()
-    components = set(re.split(r"[^a-z0-9]+", snake_case))
-    return bool(components.intersection(_FORBIDDEN_KEY_COMPONENTS))
+def hash_ip(ip_address: str | None, *, salt: str) -> str | None:
+    """
+    Salted hash of a client IP.
+
+    Deterministic within a deployment (so abuse patterns remain visible to an operator) but
+    not reversible without the server secret.
+    """
+    if not ip_address:
+        return None
+    return hmac_hex(salt, f"ip:{ip_address}")[:64]
 
 
-def contains_raw_biometric_data(value: Any) -> bool:
-    """Detect common raw biometric media markers in structured untrusted input."""
+def mask_email(email: str) -> str:
+    """``someone@example.com`` -> ``s******@example.com`` for admin listings and logs."""
+    local, _, domain = email.partition("@")
+    if not domain:
+        return "***"
+    masked_local = "*" if len(local) <= 1 else f"{local[0]}{'*' * min(len(local) - 1, 6)}"
+    return f"{masked_local}@{domain}"
 
-    if isinstance(value, dict):
-        return any(
-            _key_has_prohibited_component(str(key)) or contains_raw_biometric_data(child)
-            for key, child in value.items()
-        )
-    if isinstance(value, list):
-        return any(contains_raw_biometric_data(child) for child in value)
-    if isinstance(value, str):
-        return bool(_FORBIDDEN_VALUE.search(value) or _BASE64_BLOB.search(value))
-    return False
+
+def mask_token(token: str | None, *, keep: int = 4) -> str:
+    """Show only the tail of a token, e.g. for support diagnostics."""
+    if not token:
+        return ""
+    if len(token) <= keep:
+        return "*" * len(token)
+    return f"{'*' * 6}{token[-keep:]}"

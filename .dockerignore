@@ -1,13 +1,26 @@
 # Copyright (c) 2026 Md. Moshiur Rahman Mohi / THAMJJ13.TOP. Proprietary. All Rights Reserved.
 
 .git
-.env
+.github
 .venv
+venv
 __pycache__
-.pytest_cache
-.ruff_cache
+*.py[cod]
 .mypy_cache
-*.db
-*.egg-info
-htmlcov
+.ruff_cache
+.pytest_cache
 .coverage
+htmlcov
+tests
+docs
+data
+var
+backups
+*.db
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+uv.lock
