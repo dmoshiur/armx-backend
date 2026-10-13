@@ -263,8 +263,8 @@ locally; the kill-switch allowlist defaults to health checks.
 
 **Lint / type / test** — `ruff format` and `ruff check` clean over `app tests scripts migrations`;
 `mypy app` in strict mode clean over 84 source files (the only relaxation is `import-not-found` for
-`app/main.py`, which imports the routers of phases 5-11 that do not exist yet); 244 tests collected,
-**238 passing, 6 skipped** (skips require PostgreSQL or optional extras); `scripts/secret_scan.py`
+`app/main.py`, which imports the routers of phases 5-11 that do not exist yet); 250 tests collected,
+**244 passing, 6 skipped** (skips require PostgreSQL or optional extras); `scripts/secret_scan.py`
 clean over 134 files. The full loop is `make verify`.
 
 **Mocked** — every integration is still off: `health_status` is the only enabled tool, `mock_echo`
@@ -273,7 +273,9 @@ smart-home, mail, messaging, GitHub/Vercel, n8n or MCP call is made anywhere.
 
 **Manual setup still required** — set `LLM_PROVIDER` and the matching key/model to talk to a real
 model; `OPENAI_API_KEY` (or the provider equivalent) is validated at boot only for the provider you
-select.
+select. `create_admin` now rejects an address the API's `EmailStr` would reject (a `.local`
+special-use domain, a mailbox without a domain) instead of creating an account nobody can sign into
+- found by driving the running server rather than the test suite.
 
 ---
 

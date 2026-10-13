@@ -24,6 +24,7 @@ from collections.abc import Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy import func, select
 
 from app.audit.service import record_event
@@ -67,9 +68,28 @@ def _read_password(args: argparse.Namespace) -> str:
     return password
 
 
+def _normalise_email(raw: str) -> str:
+    """
+    Lower-case the address and require the same shape the API requires.
+
+    The sign-in endpoints validate with ``EmailStr``, so an address the API would reject (a
+    special-use domain such as ``.local``, or a mailbox without a domain) would create an account
+    nobody can ever sign into. Failing here, with a reason, is the kinder outcome.
+    """
+    candidate = raw.strip().lower()
+    try:
+        return str(TypeAdapter(EmailStr).validate_python(candidate))
+    except ValidationError as exc:
+        raise SystemExit(
+            f"Email rejected: {candidate!r} is not a usable address "
+            f"({exc.errors()[0].get('msg', 'invalid email')}).\n"
+            "Use an address with a real domain, because the API validates it the same way."
+        ) from exc
+
+
 async def run(args: argparse.Namespace) -> int:
     settings = get_settings()
-    email = args.email.strip().lower()
+    email = _normalise_email(args.email)
     role = Role(args.role)
 
     if settings.is_production and not args.force:
