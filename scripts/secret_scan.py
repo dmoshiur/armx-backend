@@ -29,6 +29,7 @@ from pathlib import Path
 #: Files that intentionally contain credential-shaped strings.
 ALLOWED_PATHS = {
     ".env.example",
+    ".env.EXAMPLE",
     "scripts/secret_scan.py",
     "tests/test_secret_scan.py",
     "docs/security.md",
