@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import actor_for, app_gateway, app_registry, db_session
 from app.audit.service import record_event
-from app.auth.dependencies import CurrentPrincipal, require_admin
+from app.auth.dependencies import CurrentPrincipal, Principal, require_admin
 from app.core.enums import AuditOutcome, AuditSource
 from app.core.errors import APIError, ErrorCode
 from app.core.risk import requires_approval
@@ -185,7 +185,7 @@ def _status_for(error_code: str | None) -> tuple[int, bool]:
 
 @router.get("/admin/tools", response_model=list[AdminToolSummary])
 async def admin_list_tools(
-    principal=Depends(require_admin),
+    principal: Principal = Depends(require_admin),
     session: AsyncSession = Depends(db_session),
     registry: ToolRegistry = Depends(app_registry),
     q: str | None = Query(default=None, max_length=64),
@@ -231,7 +231,7 @@ async def admin_list_tools(
 async def toggle_tool(
     tool_name: str,
     payload: ToggleToolRequest,
-    principal=Depends(require_admin),
+    principal: Principal = Depends(require_admin),
     session: AsyncSession = Depends(db_session),
     registry: ToolRegistry = Depends(app_registry),
 ) -> AdminToolSummary:

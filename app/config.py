@@ -260,7 +260,7 @@ class Settings(BaseSettings):
     messaging_default_auto_send: bool = False
 
     # -------------------------------------------------------------- image edits
-    image_provider: Literal["mock", "openai", "stability"] = "mock"
+    image_provider: Literal["none", "mock", "openai", "stability"] = "mock"
     image_api_key: SecretStr | None = None
     image_base_url: str = ""
     image_model: str = ""
@@ -484,7 +484,9 @@ class Settings(BaseSettings):
                     "MESSENGER_PAGE_ACCESS_TOKEN, MESSENGER_APP_SECRET and "
                     "MESSENGER_VERIFY_TOKEN are required when Messenger is enabled"
                 )
-        if self.image_provider != "mock" and _is_missing(_secret_text(self.image_api_key)):
+        if self.image_provider not in {"none", "mock"} and _is_missing(
+            _secret_text(self.image_api_key)
+        ):
             problems.append(f"IMAGE_API_KEY is required when IMAGE_PROVIDER={self.image_provider}")
         if self.alert_webhook_url and not self.alert_webhook_url.startswith(
             ("https://", "http://")

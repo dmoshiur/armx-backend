@@ -75,8 +75,9 @@ def app_llm(
     a scripted model without touching the network.
     """
     existing = getattr(request.app.state, "llm_provider", None)
-    if existing is not None:
-        return existing
+    if existing is not None and callable(getattr(existing, "complete", None)):
+        provider: LLMProvider = existing
+        return provider
     provider = build_provider(settings)
     request.app.state.llm_provider = provider
     return provider

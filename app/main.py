@@ -337,7 +337,9 @@ def _include_web_builder(application: FastAPI) -> None:
 
 #: Feature routers are included through explicit functions rather than a dynamic scan, so the
 #: API surface is greppable and a broken module fails loudly at startup instead of silently
-#: dropping routes. Entries are appended as each build phase lands.
+#: dropping routes. Entries are appended as each build phase lands. (`_include_*` functions for
+#: phases that have not landed yet exist but are deliberately not listed below, and pyproject
+#: narrows mypy's `import-not-found` to this module until they do.)
 _FEATURE_ROUTERS: tuple[Callable[[FastAPI], None], ...] = (
     _include_auth,
     _include_users,

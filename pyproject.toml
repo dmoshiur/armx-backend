@@ -96,3 +96,11 @@ exclude = ["migrations/versions/"]
 [[tool.mypy.overrides]]
 module = ["aiomqtt.*", "argon2.*", "respx.*"]
 ignore_missing_imports = true
+
+# The feature routers are imported inside small `_include_*` functions in `app/main.py` so the API
+# surface is greppable and a broken module fails at startup rather than silently dropping routes.
+# Until phases 5-11 land, some of those modules do not exist yet; the override narrows the
+# relaxation to that single file and that single error code, and is deleted as each one appears.
+[[tool.mypy.overrides]]
+module = ["app.main"]
+disable_error_code = ["import-not-found"]

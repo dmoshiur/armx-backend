@@ -116,6 +116,16 @@ async def assistant_stream(websocket: WebSocket) -> None:
                 )
                 continue
 
+            caller = principal
+            if caller is None:  # pragma: no cover - the first frame is always authenticated
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "error": {"code": ErrorCode.UNAUTHENTICATED, "message": "Sign in first"},
+                    }
+                )
+                continue
+
             text = str(frame.get("text") or "").strip()
             if not text or len(text) > 8000:
                 await websocket.send_json(
@@ -139,11 +149,11 @@ async def assistant_stream(websocket: WebSocket) -> None:
                 settings=settings,
                 provider=provider,
                 registry=registry,
-                actor=actor_for(principal),
+                actor=actor_for(caller),
                 user_message=text,
                 history=frame.get("history") if isinstance(frame.get("history"), list) else [],
-                device_id=principal.device_id,
-                session_id=principal.session_id,
+                device_id=caller.device_id,
+                session_id=caller.session_id,
                 trace_id=_trace_id(websocket),
                 ip_address=websocket.client.host if websocket.client else None,
                 dry_run=bool(frame.get("dry_run")),
@@ -155,10 +165,10 @@ async def assistant_stream(websocket: WebSocket) -> None:
                 outcome=(
                     AuditOutcome.SUCCEEDED if turn.status == "completed" else AuditOutcome.FAILED
                 ),
-                actor_user_id=principal.user_id,
-                actor_role=principal.role,
-                session_id=principal.session_id,
-                device_id=principal.device_id,
+                actor_user_id=caller.user_id,
+                actor_role=caller.role,
+                session_id=caller.session_id,
+                device_id=caller.device_id,
                 arguments={"chars": len(text), "transport": "websocket"},
                 error_code=turn.error_code,
                 result_summary=f"status={turn.status} tool_calls={turn.tool_calls}",

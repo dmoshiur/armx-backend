@@ -262,8 +262,10 @@ websocat "ws://localhost:8000/assistant/stream?token=$TOKEN"
 locally; the kill-switch allowlist defaults to health checks.
 
 **Lint / type / test** — `ruff format` and `ruff check` clean over `app tests scripts migrations`;
-244 tests collected, **238 passing, 6 skipped** (skips require PostgreSQL or optional extras);
-`scripts/secret_scan.py` clean over 134 files.
+`mypy app` in strict mode clean over 84 source files (the only relaxation is `import-not-found` for
+`app/main.py`, which imports the routers of phases 5-11 that do not exist yet); 244 tests collected,
+**238 passing, 6 skipped** (skips require PostgreSQL or optional extras); `scripts/secret_scan.py`
+clean over 134 files. The full loop is `make verify`.
 
 **Mocked** — every integration is still off: `health_status` is the only enabled tool, `mock_echo`
 exists to prove the enable/disable path, and the model provider defaults to the offline mock. No

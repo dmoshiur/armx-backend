@@ -22,12 +22,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session
 from app.audit.service import audit_event_query, count_events
-from app.auth.dependencies import CurrentPrincipal, require_admin
+from app.auth.dependencies import CurrentPrincipal, Principal, require_admin
 from app.core.enums import AuditOutcome, AuditSource, Role
 from app.core.risk import Risk
 from app.db.models import AuditEvent
@@ -97,7 +97,7 @@ class AuditEventPage(BaseModel):
 async def _page(
     session: AsyncSession,
     *,
-    statement,
+    statement: Select[AuditEvent],
     limit: int,
     offset: int,
 ) -> AuditEventPage:
@@ -176,7 +176,7 @@ async def list_all_events(
 async def trace_timeline(
     trace_id: str,
     session: Annotated[AsyncSession, Depends(db_session)],
-    _: Annotated[object, Depends(require_admin)] = None,
+    principal: Annotated[Principal, Depends(require_admin)],
 ) -> list[AuditEventView]:
     """
     Every row sharing one trace id, oldest first.

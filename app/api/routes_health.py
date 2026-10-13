@@ -130,7 +130,7 @@ async def metrics(
         from app.auth.dependencies import require_role  # local import: avoids an import cycle
         from app.core.enums import Role
 
-        await require_role(Role.ADMIN)(request)
+        require_role(Role.ADMIN)(request)  # synchronous dependency: raises, never awaits
     try:
         set_gauge("pending_approvals", float(await pending_approval_count(session)))
     except Exception as exc:

@@ -62,7 +62,9 @@ def _summary(user: User, *, active_sessions: int = 0) -> AdminUserSummary:
     )
 
 
-async def _active_session_counts(session: AsyncSession, user_ids: list[uuid.UUID]) -> dict:
+async def _active_session_counts(
+    session: AsyncSession, user_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
     if not user_ids:
         return {}
     rows = await session.execute(

@@ -389,7 +389,7 @@ class SecurityGateway:
         if approval_id is None:
             if self_approved:
                 return ToolDecision(allowed=True, spec=spec, arguments=effective)
-            approval = await create_approval(
+            created = await create_approval(
                 session,
                 self._settings,
                 tool_name=spec.name,
@@ -407,7 +407,7 @@ class SecurityGateway:
                 spec=spec,
                 error_code=ErrorCode.APPROVAL_REQUIRED,
                 message="This action needs your explicit approval before it runs",
-                approval_id=approval.id,
+                approval_id=created.id,
             )
 
         approval = await get_approval(session, approval_id)
