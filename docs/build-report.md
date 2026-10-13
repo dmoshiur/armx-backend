@@ -271,6 +271,28 @@ clean over 134 files. The full loop is `make verify`.
 exists to prove the enable/disable path, and the model provider defaults to the offline mock. No
 smart-home, mail, messaging, GitHub/Vercel, n8n or MCP call is made anywhere.
 
+**CI findings fixed in this phase's pull request** — three red jobs, each a real defect:
+
+1. **The app could not start against PostgreSQL at all.** `async_database_url` normalises an
+   operator's `DATABASE_URL` to the shipped async driver, and then rejected its own output
+   (`postgresql+psycopg://` was not an accepted input), so every settings object already holding a
+   normalised URL raised. SQLite hid it completely - `sqlite+aiosqlite://` *was* an accepted input -
+   which is why the whole suite was green while production could not boot. Normalisation is now
+   idempotent, accepts any `postgres`/`postgresql` variant, and logs when it substitutes the shipped
+   driver; `tests/test_db_urls.py` (24 tests) pins it. Verified by booting the API in
+   `ENVIRONMENT=production` against a real PostgreSQL 16 and exercising login, a tool call, the
+   assistant and the kill-switch. A second bug fell out of the same file: `sqlite:///:memory:`
+   parsed as a file called `:memory:`, so `ensure_sqlite_directory` would try to create a directory
+   that should not exist.
+2. **The secret scan failed on build output, not source.** `pip install -e ".[dev]"` writes
+   `<package>.egg-info/PKG-INFO`, which embeds `README.md`; the scan allows `README.md` by path and
+   found the documented Supabase placeholder inside a copy of it. Generated metadata
+   (`*.egg-info`, `.eggs`, `*.dist-info`) is now skipped, the placeholder line is marked, and the
+   scanner reports an out-of-tree path instead of raising a traceback.
+3. **A configuration test depended on the CI job's environment**: it proved ephemeral secret
+   generation while `JWT_SECRET_KEY` was exported for the other jobs. It now clears the variables it
+   depends on, so it tests the property rather than the ambient environment.
+
 **Manual setup still required** — set `LLM_PROVIDER` and the matching key/model to talk to a real
 model; `OPENAI_API_KEY` (or the provider equivalent) is validated at boot only for the provider you
 select. `create_admin` now rejects an address the API's `EmailStr` would reject (a `.local`

@@ -18,7 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from app.core.logging import get_logger
+
 __all__ = [
+    "POSTGRES_DRIVER",
     "async_database_url",
     "ensure_sqlite_directory",
     "is_postgres",
@@ -27,8 +30,16 @@ __all__ = [
     "sync_database_url",
 ]
 
+#: Accepted base schemes. A driver suffix (``postgresql+psycopg``) is tolerated and normalised,
+#: so passing an already-normalised URL back in is harmless - which matters because a settings
+#: object may hold either form depending on where it came from.
+logger = get_logger("db.urls")
+
 _POSTGRES_SCHEMES = {"postgres", "postgresql"}
 _SQLITE_SCHEMES = {"sqlite", "sqlite+aiosqlite", "sqlite+pysqlite"}
+
+#: The async driver this project ships for PostgreSQL.
+POSTGRES_DRIVER = "psycopg"
 
 
 def async_database_url(raw_url: str) -> str:
@@ -40,14 +51,22 @@ def async_database_url(raw_url: str) -> str:
     if not rest:
         raise ValueError("DATABASE_URL must include a scheme separator, e.g. postgresql://...")
     normalised = scheme.lower()
-    if normalised in _POSTGRES_SCHEMES:
-        return f"postgresql+psycopg://{rest}"
-    if normalised == "sqlite":  # sqlite:///relative/path.db
+    base, _, requested_driver = normalised.partition("+")
+    if base in _POSTGRES_SCHEMES:
+        if requested_driver and requested_driver != POSTGRES_DRIVER:
+            logger.info(
+                "DATABASE_URL asked for driver %r; using the shipped driver %r",
+                requested_driver,
+                POSTGRES_DRIVER,
+            )
+        return f"postgresql+{POSTGRES_DRIVER}://{rest}"
+    if base == "sqlite":
+        if requested_driver in {"aiosqlite", "pysqlite"}:
+            return f"sqlite+{requested_driver}://{rest}"
         return f"sqlite+aiosqlite://{rest}"
-    if normalised in _SQLITE_SCHEMES:
-        return url
     raise ValueError(
-        f"unsupported DATABASE_URL scheme {scheme!r}: expected postgresql:// or sqlite"
+        f"unsupported DATABASE_URL scheme {scheme!r}: "
+        "expected postgresql://, postgresql+psycopg:// or sqlite://"
     )
 
 
@@ -97,11 +116,15 @@ def sqlite_file_path(raw_url: str) -> Path | None:
     if not url.startswith("sqlite"):
         return None
     rest = url.partition("://")[2].split("?", 1)[0]
-    if not rest or rest.startswith(":memory:") or "mode=memory" in rest:
+    # ``sqlite:///:memory:`` and ``sqlite:///`` arrive with a leading slash: strip it before
+    # deciding, or an in-memory database looks like a file called ":memory:" - and
+    # ``ensure_sqlite_directory`` would then try to create a directory that should not exist.
+    stripped = rest.lstrip("/")
+    if not stripped or stripped.startswith(":memory:") or "mode=memory" in rest:
         return None
-    if rest.startswith("//"):
-        return Path("/" + rest.lstrip("/"))
-    return Path(rest.lstrip("/"))
+    if rest.startswith("//"):  # four slashes in the URL: an absolute path
+        return Path("/" + stripped)
+    return Path(stripped)
 
 
 def ensure_sqlite_directory(raw_url: str) -> None:

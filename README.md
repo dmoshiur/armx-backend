@@ -62,7 +62,7 @@ Assistant), `workflows` (n8n). Production uses Supabase instead of the bundled d
 
 ```bash
 # .env.prod
-DATABASE_URL=postgresql+psycopg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+DATABASE_URL=postgresql+psycopg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres  # secret-scan:allow (documented placeholder, not a credential)
 ENVIRONMENT=production
 DEMO_INSECURE=false
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d

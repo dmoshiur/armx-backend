@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts import secret_scan
 from scripts.secret_scan import scan, scan_file
 
 PLANTED = [
@@ -65,3 +66,35 @@ def test_repository_is_clean() -> None:
     root = Path(__file__).resolve().parents[1]
     findings = scan([root], root=root)
     assert findings == [], "committed secrets detected:\n" + "\n".join(findings)
+
+
+class TestGeneratedFiles:
+    """
+    Build output is not source.
+
+    ``pip install -e ".[dev]"`` (which every CI job runs) writes ``<package>.egg-info/`` into the
+    working tree, and ``PKG-INFO`` embeds ``README.md`` - a file the scanner deliberately allows,
+    reproduced at a path it does not. Scanning build output produced a CI failure about a file
+    nobody wrote, so generated metadata is skipped by suffix.
+    """
+
+    def test_egg_info_is_skipped(self, tmp_path: Path) -> None:
+        metadata = tmp_path / "armx_backend.egg-info"
+        metadata.mkdir()
+        (metadata / "PKG-INFO").write_text("Metadata-Version: 2.1\n")
+        copied = metadata / "PKG-INFO"
+        copied.write_text(copied.read_text())
+        assert list(secret_scan._iter_files([tmp_path])) == []
+
+    def test_a_generated_file_outside_metadata_is_still_scanned(self, tmp_path: Path) -> None:
+        plain = tmp_path / "notes.txt"
+        plain.write_text("nothing to see\n")
+        assert [path.name for path in secret_scan._iter_files([tmp_path])] == ["notes.txt"]
+
+    def test_a_path_outside_the_scan_root_is_reported_not_raised(self, tmp_path: Path) -> None:
+        """Handed a path outside the working tree, the scanner reports it instead of crashing."""
+        outside = tmp_path / "elsewhere.md"
+        outside.write_text("password = 'A7bQ2xL9mZ4pR1sT6vW3'\n")
+        findings = secret_scan.scan_file(outside, root=Path.cwd())
+        assert findings, "a credential-shaped line must still be found"
+        assert str(outside) in findings[0]

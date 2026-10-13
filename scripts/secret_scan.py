@@ -35,6 +35,11 @@ ALLOWED_PATHS = {
     "README.md",
 }
 
+#: Generated packaging metadata is not source: ``pip install -e .`` writes ``*.egg-info/PKG-INFO``
+#: (which embeds the README) and ``SOURCES.txt`` into the tree, and scanning build output produces
+#: findings about files nobody wrote. Matched by suffix as well as by name.
+_SKIP_DIR_SUFFIXES = (".egg-info", ".eggs", ".dist-info")
+
 _SKIP_DIRS = {
     ".git",
     ".venv",
@@ -201,11 +206,15 @@ def _looks_like_secret(value: str) -> bool:
     return classes >= 2 and has_upper_or_digit
 
 
+def _skip_part(part: str) -> bool:
+    return part in _SKIP_DIRS or part.endswith(_SKIP_DIR_SUFFIXES)
+
+
 def _iter_files(paths: Iterable[Path]) -> Iterator[Path]:
     for path in paths:
         if path.is_dir():
             for candidate in sorted(path.rglob("*")):
-                if any(part in _SKIP_DIRS for part in candidate.parts):
+                if any(_skip_part(part) for part in candidate.parts):
                     continue
                 if candidate.is_file() and candidate.suffix.lower() not in _SKIP_SUFFIXES:
                     yield candidate
@@ -240,8 +249,16 @@ def _is_local_or_placeholder_url(url: str) -> bool:
     return _is_placeholder(password)
 
 
+def _relative(path: Path, root: Path) -> Path:
+    """Best-effort path for a report, for targets inside or outside the working tree."""
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return path
+
+
 def scan_file(path: Path, *, root: Path) -> list[str]:
-    relative = path.relative_to(root) if path.is_absolute() else path
+    relative = _relative(path, root)
     if str(relative) in ALLOWED_PATHS:
         return []
     try:

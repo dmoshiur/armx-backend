@@ -22,7 +22,11 @@ def _production_kwargs() -> dict[str, object]:
     }
 
 
-def test_development_generates_ephemeral_secrets_once() -> None:
+def test_development_generates_ephemeral_secrets_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The ambient environment (CI exports JWT_SECRET_KEY for other jobs) must not decide what this
+    # test proves: remove the keys so the generator path is the only thing under test.
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
     settings = Settings(environment="development")
     assert settings.jwt_secret_was_generated is True
     assert settings.encryption_key_was_generated is True
